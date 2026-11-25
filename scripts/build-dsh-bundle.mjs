@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseDir = path.join(root, "dist");
 const PACKAGE_NAME_RE =
   /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
-const packageName = process.env.SEAL_NPM_PACKAGE?.trim() || "@seal/dsh";
+const packageName = process.env.SEAL_NPM_PACKAGE?.trim() || "seal-dsh";
 if (packageName.length > 214 || !PACKAGE_NAME_RE.test(packageName)) {
   throw new Error(`Invalid SEAL_NPM_PACKAGE: ${JSON.stringify(packageName)}`);
 }
@@ -115,7 +115,10 @@ try {
     platform: "browser",
     format: "iife",
     target: "es2022",
-    define: { __SEAL_VERSION__: JSON.stringify(version) },
+    define: {
+      __SEAL_VERSION__: JSON.stringify(version),
+      __SEAL_PACKAGE_NAME__: JSON.stringify(packageName),
+    },
   });
   fs.writeFileSync(
     path.join(destination, "lib/index.js"),

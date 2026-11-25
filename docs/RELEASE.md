@@ -21,11 +21,11 @@ Seal 现已内置 MIT 协议的 **PDFium WASM** 引擎，**无需安装或配置
 
 ### 方式 2：通过 npm 包名直接安装
 
-- **Desktop 桌面端用户（推荐）**：打开 DeepSeek Harness → 左侧 **插件（Plugins）** → **添加插件（Add plugin）** → 直接输入包名 `@seal/dsh`（或自定义 `SEAL_NPM_PACKAGE` 包名 / 本地 `.tgz` 路径）点击安装即可，无需命令行。
+- **Desktop 桌面端用户（推荐）**：打开 DeepSeek Harness → 左侧 **插件（Plugins）** → **添加插件（Add plugin）** → 直接输入包名 `seal-dsh`（或自定义 `SEAL_NPM_PACKAGE` 包名 / 本地 `.tgz` 路径）点击安装即可，无需命令行。
 - **Web 命令行模式用户**：
 
 ```bash
-dsh plugin --profile web add @seal/dsh
+dsh plugin --profile web add seal-dsh
 # 或使用本地构建产物离线安装：
 dsh plugin --profile web add dist/seal-dsh-<version>.tgz
 ```

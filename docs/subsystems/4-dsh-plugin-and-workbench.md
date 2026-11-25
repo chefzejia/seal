@@ -2,7 +2,7 @@
 
 ## 一、插件身份、打包与参考资料
 
-- 包名 `@seal/dsh`（支持通过 `SEAL_NPM_PACKAGE` 在构建/发版时覆盖），插件行名 `seal-workbench`，由 `scripts/build-dsh-bundle.mjs` 构建为 `dist/seal-dsh-<version>.tgz`（含 `README.md`、`locale/zh.json`、`locale/en.json`、`icon.svg`、`license`、`repository`、`homepage`、`keywords`、`publishConfig` 等公网 npm 与 DSH 插件展示元数据）。每次交付递增补丁版本并使用新文件名；`engines.dsh` 与对等依赖按实际安装的 DSH 版本核对。
+- 包名 `seal-dsh`（支持通过 `SEAL_NPM_PACKAGE` 在构建/发版时覆盖，打包时同步注入 `cordis.patch.yml` 与客户端 `__ModuleLoader__` 模块 ID），插件行名 `seal-workbench`，由 `scripts/build-dsh-bundle.mjs` 构建为 `dist/seal-dsh-<version>.tgz`（含 `README.md`、`locale/zh.json`、`locale/en.json`、`icon.svg`、`license`、`repository`、`homepage`、`keywords`、`publishConfig` 等公网 npm 与 DSH 插件展示元数据）。每次交付递增补丁版本并使用新文件名；`engines.dsh` 与对等依赖按实际安装的 DSH 版本核对。
 - **DSH 插件市场索引（Format 1）**：由 `scripts/build-market-index.mjs`（`npm run build:market`）依据最新打包产物生成 `market/index.json` 与 `market/icon.svg`，严格遵循 `@deepseek-ai/dsh-plugin-market-index` Format 1 规范（`format: 1`、中英文 `title`/`description`、`metadata`、`plugins[].versions[]` 含 `source: { type: "npm" }` 与 `engines.dsh`），托管于公开仓库免费直链供 DSH 发现页直接安装更新。
 - **零 Poppler 外部依赖与跨平台环境体检**：PDF 页数、中文文本抽取与高清 PNG 光栅化（`extractPdf`、`renderDocxPages`、`extractDocxPageTexts`）默认由随包内置的 MIT 协议 PDFium WASM（`@hyzyla/pdfium` + `sharp`）在串行 WASM 访问保护下完成，用户无需安装或配置 Poppler；外部系统依赖仅保留有官方图形安装包、跨平台自动探测路径（macOS / Windows / Linux）的 LibreOffice（`soffice`），并在工作台首页通过 `/api/seal/status` 与 `overview()` 做只读环境自检——装齐时静默不打扰，缺失 LibreOffice 时温和提示影响范围与官方下载直链。
 - DSH 插件开发以已安装版本的文档与源码为准，不凭记忆：

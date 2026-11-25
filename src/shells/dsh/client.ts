@@ -29,6 +29,7 @@ import {
 } from "../../workbench/knowledge.js";
 
 declare const __SEAL_VERSION__: string;
+declare const __SEAL_PACKAGE_NAME__: string;
 type DictionaryKey = keyof typeof zh;
 interface ReactRuntime {
   createElement(type: unknown, props?: unknown, ...children: unknown[]): any;
@@ -108,14 +109,18 @@ interface Overview {
 }
 const NS = "seal",
   PANEL_ID = "seal",
-  TAB_ID = "@seal/dsh";
+  PACKAGE_NAME =
+    typeof __SEAL_PACKAGE_NAME__ === "string"
+      ? __SEAL_PACKAGE_NAME__
+      : "seal-dsh",
+  TAB_ID = PACKAGE_NAME;
 const currentWindow = window as unknown as {
   __ModuleLoader__: { load(module: unknown): void };
   __DSH_HOST_PATHS__?: { pathFor(file: File): string };
 };
 
 currentWindow.__ModuleLoader__.load({
-  id: "@seal/dsh",
+  id: PACKAGE_NAME,
   factory(require: (name: string) => unknown) {
     const React = require("react") as ReactRuntime;
     const h = React.createElement;

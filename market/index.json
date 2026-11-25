@@ -43,7 +43,7 @@
   },
   "plugins": [
     {
-      "name": "@seal/dsh",
+      "name": "seal-dsh",
       "title": {
         "en": "Seal",
         "zh": "Seal"
@@ -74,13 +74,13 @@
           "verified-workflow"
         ],
         "sortKeys": {
-          "updated": 1795598652
+          "updated": 1795603769
         }
       },
       "versions": [
         {
-          "version": "0.1.597",
-          "publishTimestamp": 1795598652,
+          "version": "0.1.604",
+          "publishTimestamp": 1795603769,
           "source": {
             "type": "npm"
           },

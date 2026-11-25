@@ -88,8 +88,16 @@ test('complete TGZ executes through the installed DSH SDK and native executor', 
     await run('tar', ['-xzf', artifact, '-C', sandbox]);
     const packageDir = path.join(sandbox, 'package');
     const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
-    assert.equal(manifest.name, '@seal/dsh');
+    const expectedPackageName = process.env.SEAL_NPM_PACKAGE?.trim() || 'seal-dsh';
+    assert.equal(manifest.name, expectedPackageName);
     assert.equal(path.basename(artifact), `seal-dsh-${manifest.version}.tgz`);
+    const patchYaml = fs.readFileSync(path.join(packageDir, 'cordis.patch.yml'), 'utf8');
+    assert.ok(patchYaml.includes(`name: '${expectedPackageName}'`), 'cordis.patch.yml must reference the published package name');
+    const clientJs = fs.readFileSync(path.join(packageDir, 'lib/client.js'), 'utf8');
+    assert.ok(
+      clientJs.includes(`"${expectedPackageName}"`) || clientJs.includes(`'${expectedPackageName}'`),
+      'lib/client.js must register __ModuleLoader__ with the published package name',
+    );
     assert.equal(manifest.exports['.'], './lib/index.js');
     assert.equal(manifest.author, 'Seal Team');
     assert.equal(manifest.license, 'MIT');

@@ -26,16 +26,18 @@ Seal 不替 Agent 做语义判断，只提供可靠的文档与知识库工具�
 
 - **DSH 插件市场索引 URL**（添加后可一键安装与更新）：
   `https://raw.githubusercontent.com/chefzejia/seal/main/market/index.json`
-- **或通过 npm 包名直接安装**：`dsh plugin --profile desktop add @seal/dsh`
+- **或直接在 DSH 桌面端通过 npm 包名安装**：打开 DeepSeek Harness → 左侧 **插件（Plugins）** → **添加插件（Add plugin）** → 输入 `seal-dsh` 点击安装即可（命令行 Web 模式可用 `dsh plugin --profile web add seal-dsh`）。
 - 完整发版与安装步骤见 [docs/RELEASE.md](docs/RELEASE.md)。
 
-### 2. 从源码构建并安装到真实 DSH Desktop Profile
+### 2. 从源码构建并本地安装
 
 ```bash
 npm install
 npm run build:dsh
 npm run build:market       # 同步更新 market/index.json 与 market/icon.svg
-dsh plugin --profile desktop add dist/seal-dsh-<version>.tgz
+# 桌面端：在 DSH「插件 → 添加插件」填入 dist/seal-dsh-<version>.tgz 路径
+# Web 命令行模式：
+dsh plugin --profile web add dist/seal-dsh-<version>.tgz
 ```
 
 重启 DeepSeek Harness Desktop 后，左侧导航栏会出现 **Seal** 全局入口（建议先核对顶部「运行版本」与安装包版本一致）：
