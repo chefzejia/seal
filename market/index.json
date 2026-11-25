@@ -1,0 +1,94 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Seal Plugin Index",
+    "zh": "Seal 插件索引"
+  },
+  "description": {
+    "en": "Official Seal plugin index for DeepSeek Harness — evidence-backed Word/Office assembly and deterministic verification.",
+    "zh": "DeepSeek Harness 官方 Seal 插件索引——证据驱动 Word/Office 文档装配与确定性核验工作台。"
+  },
+  "metadata": {
+    "categories": {
+      "office-documents": {
+        "title": {
+          "en": "Office & Documents",
+          "zh": "办公与文档"
+        }
+      }
+    },
+    "labels": {
+      "local-first": {
+        "title": {
+          "en": "Local-First",
+          "zh": "本地优先"
+        }
+      },
+      "verified-workflow": {
+        "title": {
+          "en": "Deterministic Verification",
+          "zh": "确定性验算"
+        }
+      }
+    },
+    "sortKeys": {
+      "updated": {
+        "title": {
+          "en": "Recently Updated",
+          "zh": "最近更新"
+        },
+        "order": "desc"
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "@seal/dsh",
+      "title": {
+        "en": "Seal",
+        "zh": "Seal"
+      },
+      "description": {
+        "en": "Evidence-backed Word/Office assembly and deterministic verification workbench (with bidding as the first end-to-end workflow): use the Seal sidebar page for knowledge vaults and starting bids, and the right session pane for review, page preview, and final export. Includes built-in MIT PDFium WASM (no Poppler needed); install free official LibreOffice to enable .doc/.xls import, page preview, and automatic TOC page numbers. Disabling the plugin removes Seal tools, panels, and skills while keeping local projects and vaults intact.",
+        "zh": "面向受控 Word/Office 交付的证据驱动文档装配与核验工作台（以招投标为首个端到端场景）：左侧「Seal」全局指挥台提供企业知识库建档与开启项目入口，会话右栏提供审阅清单、页面预览与定稿导出。已内置 MIT 协议 PDFium WASM 引擎，无需配置 Poppler；安装免费官方 LibreOffice 后可解锁 .doc/.xls 导入、页面预览与目录自动回填页码。停用插件后将移除 Seal 工具、审阅工作台与技能，项目及知识库文件仍保留在本地。"
+      },
+      "icon": "./icon.svg",
+      "author": "Seal Team",
+      "homepage": "https://github.com/chefzejia/seal#readme",
+      "repository": {
+        "url": "https://github.com/chefzejia/seal"
+      },
+      "metadata": {
+        "category": "office-documents",
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "seal",
+          "docx",
+          "office",
+          "knowledge-base",
+          "bidding"
+        ],
+        "labels": [
+          "local-first",
+          "verified-workflow"
+        ],
+        "sortKeys": {
+          "updated": 1795598652
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.597",
+          "publishTimestamp": 1795598652,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.5 <0.3.0"
+          }
+        }
+      ]
+    }
+  ]
+}

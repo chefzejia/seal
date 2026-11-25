@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "sccc-property-2022",
+  "normalization": "ignore-whitespace",
+  "forms": [
+    {
+      "id": "authorization",
+      "title": "格式3：法定代表人/单位负责人授权书",
+      "renderedPage1": 23,
+      "fields": [
+        {
+          "id": "bidder-in-sentence",
+          "anchor": "本授权声明：",
+          "position": "本格式首句，标为（投标人名称）的XXXX片段",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "legal-name-role",
+          "anchor": "（法定代表人/单位负责人姓名、职务）",
+          "position": "本格式首句，该提示前XXXX片段",
+          "meaning": "法定代表人或单位负责人姓名与职务"
+        },
+        {
+          "id": "agent-name-role",
+          "anchor": "授权XXXX（被授权人姓名、职务）",
+          "position": "本格式首句，授权后的XXXX片段",
+          "meaning": "被授权人姓名与职务"
+        },
+        {
+          "id": "project",
+          "anchor": "“XXXXXXXX” 项目",
+          "position": "本格式首句，双引号内的XXXXXXXX",
+          "meaning": "项目名称"
+        },
+        {
+          "id": "legal-signature",
+          "anchor": "法定代表人/单位负责人（委托人）签字或者加盖个人名章：",
+          "position": "本格式内，冒号后XXXX",
+          "meaning": "授权人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "agent-signature",
+          "anchor": "授权代表（被授权人）签字：",
+          "position": "本格式内，冒号后XXXX",
+          "meaning": "被授权人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "bidder",
+          "anchor": "投标人名称：",
+          "position": "本格式末尾，冒号后XXXX",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "date",
+          "anchor": "日 期：",
+          "position": "本格式末尾，冒号后XXXX；按原文日期标签定位",
+          "meaning": "签署日期"
+        }
+      ],
+      "coverage": {
+        "scope": "本格式适用时，逐项覆盖首句四处逻辑填写片段、双方签署、落款单位与日期。",
+        "excluded": [
+          "身份证明图片挂载区不计文字空白分母。",
+          "首句本授权声明后相邻的两组XXXX与（投标人名称）归为同一逻辑名称片段；不把排版空格拆成新字段。",
+          "整表供应商类型条件及自然人身份证明替代要求见applicability；未明确供应商类型时全部字段的适用性待判定。"
+        ]
+      },
+      "applicability": {
+        "requiredWhen": "供应商为法人单位或其他组织，分别提供法定代表人授权书或单位负责人授权书",
+        "notRequiredWhen": "供应商为自然人",
+        "source": {
+          "anchor": "供应商为法人单位时提供“法定代表人授权书”，供应商为其他组织时提供“单位负责人授权书”，供应商为自然人时提供“自然人身份证明材料”。",
+          "position": "本格式下方“注”第1条",
+          "renderedPage1": 23
+        },
+        "alternativeRequirement": "供应商为自然人时，改提供“自然人身份证明材料”。"
+      }
+    },
+    {
+      "id": "opening-price",
+      "title": "格式7：报价一览表（实质性要求）",
+      "renderedPage1": 28,
+      "fields": [
+        {
+          "id": "project",
+          "anchor": "项目名称：",
+          "position": "本格式标题下，冒号后留白",
+          "meaning": "项目名称"
+        },
+        {
+          "id": "row-1-sequence",
+          "anchor": "序号",
+          "position": "本格式表头下第1条预留业务行的对应空白单元格",
+          "meaning": "业务行序号",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-1-service",
+          "anchor": "服务项目",
+          "position": "本格式表头下第1条预留业务行的对应空白单元格",
+          "meaning": "服务项目名称",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-1-price",
+          "anchor": "投标价（万元）",
+          "position": "本格式表头下第1条预留业务行的对应空白单元格",
+          "meaning": "分项报价",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-1-completion",
+          "anchor": "完成时间",
+          "position": "本格式表头下第1条预留业务行的对应空白单元格",
+          "meaning": "服务完成时间",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-2-sequence",
+          "anchor": "序号",
+          "position": "本格式表头下第2条预留业务行的对应空白单元格",
+          "meaning": "业务行序号",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-2-service",
+          "anchor": "服务项目",
+          "position": "本格式表头下第2条预留业务行的对应空白单元格",
+          "meaning": "服务项目名称",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-2-price",
+          "anchor": "投标价（万元）",
+          "position": "本格式表头下第2条预留业务行的对应空白单元格",
+          "meaning": "分项报价",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-2-completion",
+          "anchor": "完成时间",
+          "position": "本格式表头下第2条预留业务行的对应空白单元格",
+          "meaning": "服务完成时间",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-3-sequence",
+          "anchor": "序号",
+          "position": "本格式表头下第3条预留业务行的对应空白单元格",
+          "meaning": "业务行序号",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-3-service",
+          "anchor": "服务项目",
+          "position": "本格式表头下第3条预留业务行的对应空白单元格",
+          "meaning": "服务项目名称",
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-3-price",
+          "anchor": "投标价（万元）",
+          "position": "本格式表头下第3条预留业务行的对应空白单元格",
+          "meaning": "分项报价",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "row-3-completion",
+          "anchor": "完成时间",
+          "position": "本格式表头下第3条预留业务行的对应空白单元格",
+          "meaning": "服务完成时间",
+          "requiresHumanDecision": true,
+          "requiredWhen": "该预留业务行用于报价"
+        },
+        {
+          "id": "sum",
+          "anchor": "报价合计（万元）：",
+          "position": "本格式表格下，冒号后至大写标签前",
+          "meaning": "总报价小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "sum-words",
+          "anchor": "大写：",
+          "position": "本格式表格下，冒号后留白",
+          "meaning": "总报价大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "bidder",
+          "anchor": "投标人名称：",
+          "position": "本格式末尾，冒号后XXXX",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "date",
+          "anchor": "投标日期：",
+          "position": "本格式末尾，冒号后XXXX",
+          "meaning": "投标日期"
+        },
+        {
+          "id": "signatory",
+          "anchor": "法定代表人/单位负责人或授权代表（签字或加盖个人名章）：",
+          "position": "本格式表后，冒号后的XXXX",
+          "meaning": "有权代表签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "row-1-remarks",
+          "anchor": "备注",
+          "position": "本格式表头下第1条预留业务行的备注空格",
+          "meaning": "业务行解释说明",
+          "requiredWhen": "该业务行需要解释说明"
+        },
+        {
+          "id": "row-2-remarks",
+          "anchor": "备注",
+          "position": "本格式表头下第2条预留业务行的备注空格",
+          "meaning": "业务行解释说明",
+          "requiredWhen": "该业务行需要解释说明"
+        },
+        {
+          "id": "row-3-remarks",
+          "anchor": "备注",
+          "position": "本格式表头下第3条预留业务行的备注空格",
+          "meaning": "业务行解释说明",
+          "requiredWhen": "该业务行需要解释说明"
+        }
+      ],
+      "coverage": {
+        "scope": "覆盖三条预留业务行五列空格，以及项目、合计大小写、落款与日期；备注为条件适用，逐行列出。",
+        "excluded": [
+          "合计行左侧无标签的排版空格不另作业务填写位置。",
+          "未使用业务行和无需备注的标签保留；统计须另报适用性或人工跳过理由，不静默从分母删掉。"
+        ]
+      }
+    }
+  ]
+}

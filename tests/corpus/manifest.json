@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "recordedOn": "2026-11-16",
+  "samples": [
+    {
+      "id": "luoding-tax-property-2023",
+      "title": "国家税务总局罗定市税务局机关及下属税务分局物业管理服务项目",
+      "category": "services",
+      "purchaser": {
+        "name": "国家税务总局罗定市税务局",
+        "type": "行政机关"
+      },
+      "source": {
+        "publisher": "国家税务总局广东省税务局",
+        "pageUrl": "https://guangdong.chinatax.gov.cn/yfgkml/yfldgkml_zfcg/2023-11/27/content_599006cd597e42e9a065ecf69f249e9d.shtml",
+        "downloadUrl": "https://guangdong.chinatax.gov.cn/yfgkml/yfldgkml_zfcg/2023-11/27/599006cd597e42e9a065ecf69f249e9d/files/836d9cf3cb3f489b9348e7302a0b27a9.docx",
+        "publishedOn": "2023-11-27",
+        "verifiedOn": "2026-11-16",
+        "verification": "官方公告页附件直接指向本文件；网页、项目名称和项目编号 0877-23GZTP01Y774 与原文封面一致。"
+      },
+      "downloadedOn": "2026-11-16",
+      "file": {
+        "relativePath": "luoding-tax-property-2023/tender.docx",
+        "sourceFileName": "1Y774--国家税务总局罗定市税务局机关及下属税务分局物业管理服务项目--拟发售搞（定）.docx",
+        "sha256": "a2c90bb6c18767f72b10d9848144fe8ac512ac4a03952e169f25dd41626431d3",
+        "bytes": 489277,
+        "format": "docx"
+      },
+      "structure": {
+        "formatSection": {
+          "title": "第六部分 投标文件格式",
+          "renderedPage1": 63,
+          "printedPage": "63",
+          "tocPage": "65",
+          "approximatePosition": "全篇约 63/100 页；先按章节标题定位，再核对原文锚点。",
+          "bodyParagraphIndex1": 1332,
+          "endBoundary": "投标文件所用格式到六、唱标信封（渲染第97页）。七、其他格式文件在第98–100页，原文明确其不属于投标文件格式的组成部分。"
+        },
+        "volumes": [
+          "五部分合成一本：自查表、资格性符合性、商务、技术（服务）、价格；正本1份、副本4份、电子版1份。",
+          "唱标信封单独封装：开标一览表、法定代表人资格证明书、授权委托书和电子版U盘；开标一览表原件另备一份。"
+        ],
+        "forms": [
+          "投标文件封面/密封包封面（参考）",
+          "1.1 自查表",
+          "1.2 商务评分页码对应表",
+          "1.3 技术（服务）评分页码对应表",
+          "2.1 投标函",
+          "2.2.1 法定代表人资格证明书",
+          "2.2.2 法定代表人授权委托书",
+          "2.4 投标人资格声明函",
+          "2.4.1 供应商资格条件证明材料（含三份书面声明）",
+          "2.5 实质性响应一览表（“★”项）",
+          "书面声明（保密与不得围猎税务人员）",
+          "3.1 投标人简介",
+          "3.2 合同响应一览表",
+          "3.3 商务评审部分文件",
+          "3.4 近年完成同类项目一览表",
+          "3.5 管理和技术人员一览表",
+          "3.6 投标人认为应当提交的其他商务文件",
+          "4.1 重要条款响应表",
+          "4.2 一般条款响应表",
+          "4.3 技术（服务）评审部分文件",
+          "4.4 投标人认为应当提交的其他技术文件",
+          "5.1 开标一览表",
+          "5.2 明细报价表",
+          "5.3 中小企业声明函（如适用）",
+          "5.4 监狱企业的证明文件（如适用）",
+          "5.5 残疾人福利性单位声明函（如适用）",
+          "5.7 招标代理服务费承诺书",
+          "六、唱标信封",
+          "7.1 询问函格式（其他格式，不属投标文件）",
+          "7.2 质疑函格式（其他格式，不属投标文件）"
+        ],
+        "features": [
+          "正文27张表，其中1张嵌套表；存在横向与纵向合并单元格。",
+          "授权委托书身份证复印件位置含文本框（正文共4个 txbxContent）；同段含姓名和权限两处句中留白。",
+          "报价表服务期已预填，不是待填空；金额大小写分开。",
+          "编号沿用原文：2.2后为2.4，5.5后为5.7；不是标签漏项。",
+          "条件适用声明与自拟内容同处格式章节；七、其他格式文件（第98–100页）的询问/质疑函明确不属于投标文件格式组成，不能默认复制进投标文件。",
+          "所选授权委托书第73页备注2明确：投标签字代表为法定代表人时无需提供整份授权书；条件由全部字段继承，不能按10处留白推断其适用。"
+        ],
+        "selectedFormApplicability": [
+          {
+            "formId": "authorization",
+            "source": {
+              "anchor": "若投标签字代表为法定代表人，则无需提供本授权委托书",
+              "position": "本格式末尾“--备注--”第2条",
+              "renderedPage1": 73
+            }
+          }
+        ]
+      },
+      "labels": "labels/luoding-tax-property-2023.json"
+    },
+    {
+      "id": "zhengzhou-goods-2023",
+      "title": "郑州市第一人民医院四维超声诊断仪采购项目",
+      "category": "goods",
+      "purchaser": {
+        "name": "郑州市第一人民医院",
+        "type": "公立医院（事业单位）"
+      },
+      "source": {
+        "publisher": "河南省政府采购网",
+        "pageUrl": "https://zfcg.henan.gov.cn/henan/content?infoId=1517802&channelCode=H610101",
+        "downloadUrl": "https://sanmenxia.zfcg.henan.gov.cn/cmsweb81e27e/nas/webfile2024//zhengzhou/rootfiles/2023/12/27/c550614a76bb4d01964e62d4451d2b08.doc",
+        "publishedOn": "2023-12-06",
+        "verifiedOn": "2026-11-16",
+        "verification": "官方二次招标公告与官方政府采购附件的项目名称、采购人、编号郑财招标采购-2023-266一致。附件封面仍写二〇二三年九月；本条冻结下载字节，不据此声称最新修订版。公告页面为动态壳，附件由同一省政府采购站的三门峡域名托管郑州目录。"
+      },
+      "downloadedOn": "2026-11-16",
+      "file": {
+        "relativePath": "zhengzhou-goods-2023/tender.docx",
+        "sourceFileName": "c550614a76bb4d01964e62d4451d2b08.doc",
+        "sha256": "4de752418f6ed6b59f45d2b22075a4bb11a8e9db6565bf1bfadee6478ace53f5",
+        "bytes": 156367,
+        "format": "docx"
+      },
+      "structure": {
+        "formatSection": {
+          "title": "第六章 投标文件格式",
+          "renderedPage1": 54,
+          "printedPage": "51",
+          "tocPage": "41",
+          "approximatePosition": "全篇约 54/75 页；先按章节标题定位，再核对原文锚点。",
+          "bodyParagraphIndex1": 1265,
+          "endBoundary": "格式章节含后续五份附件，直到文末（渲染第75页）。"
+        },
+        "volumes": [
+          "上传加密电子投标文件（.ZZTF）；正文按第六章统一目录组织，未另列商务/技术分册要求。"
+        ],
+        "forms": [
+          "投标文件封面",
+          "一、投标函",
+          "二、法定代表人身份证明或附有法定代表人身份证明的企业法定代表人授权书（含1.身份证明、2.授权书）",
+          "三、投标一览表",
+          "四、投标货物分项报价明细表",
+          "五、规格性能偏离表",
+          "六、商务规格响应表",
+          "七、投标承诺函",
+          "八、资格性证明材料",
+          "九、商务部分",
+          "十、技术部分",
+          "十一、其他资料",
+          "附件1：中小企业声明函（货物）",
+          "附件2：残疾人福利性单位声明函",
+          "附件3：监狱企业",
+          "附件4：节能环保产品证明文件",
+          "附件5：反商业贿赂承诺书"
+        ],
+        "features": [
+          "官网后缀为.doc，实际下载字节是含word/document.xml的OOXML ZIP；本地按.docx保存，字节未转换。",
+          "正文15张表，含大量横向与纵向合并单元格；投标一览表的总报价大小写位于同一复杂表格。",
+          "页眉重复项目名与招标文件标题，页脚有机构名、图案及印刷页码。",
+          "目录标格式章41页；本机LibreOffice渲染为PDF第54页、印刷页51，应使用标题锚点。",
+          "合同章节中也有授权委托书，标注仅限第六章企业法定代表人授权书。",
+          "格式章后附政策声明与信用承诺，不能在十一、其他资料处提前截断。",
+          "第59页二、总标题列出身份证明或附证明授权书两个分支；所选第60页授权书按实际选用分支统计，不外推具体签署人的免交条件。"
+        ],
+        "selectedFormApplicability": [
+          {
+            "formId": "authorization",
+            "source": {
+              "anchor": "二、法定代表人身份证明或附有法定代表人身份证明的企业法定代表人授权书",
+              "position": "相邻第59页的二、总标题；第60页为其第2项授权书",
+              "renderedPage1": 59
+            }
+          }
+        ]
+      },
+      "labels": "labels/zhengzhou-goods-2023.json"
+    },
+    {
+      "id": "sccc-property-2022",
+      "title": "四川化工职业技术学院河边村家属区物业对外托管服务采购项目",
+      "category": "services",
+      "purchaser": {
+        "name": "四川化工职业技术学院",
+        "type": "公办高等院校（事业单位）"
+      },
+      "source": {
+        "publisher": "四川化工职业技术学院",
+        "pageUrl": "https://sccc.edu.cn/info/1361/90741.htm",
+        "downloadUrl": "https://sccc.edu.cn/virtual_attach_file.vsb?afc=TLNUtYozTfU494njRARnzGYUl-an7-wsUmL4L8CiM7rRM4U0gihFp2hmCIa0nSh2oSyDU1y4oRv8U8rfUzv8nRnVL8UinzCaLmTkUmrVUmfFLR-aoznRnmVFUNnVLYbNpDMZo4OYLR-YLz7PMz7YLRNPLRl8L1bNpDMZo4x4CDAjgDTJQty0LzLDLSybLRv8LSbw62X8c&oid=2137540492&tid=1361&nid=90741&e=.docx",
+        "publishedOn": "2022-11-15",
+        "verifiedOn": "2026-11-16",
+        "verification": "学校官方采购公告直接附本Word文件；原文采购编号SCCC-2022-028与公告一致。"
+      },
+      "downloadedOn": "2026-11-16",
+      "file": {
+        "relativePath": "sccc-property-2022/tender.docx",
+        "sourceFileName": "SCCC-2022-028-四川化工职业技术学院河边村家属区物业对外托管服务采购项目文件11.15.docx",
+        "sha256": "a19d2e97e4ade63a472e8838fc7caca2bc76d91ca72ad96adb3a3b21bb1aa9c9",
+        "bytes": 48611,
+        "format": "docx"
+      },
+      "structure": {
+        "formatSection": {
+          "title": "第六章 投标文件格式",
+          "renderedPage1": 18,
+          "printedPage": "16",
+          "tocPage": "12",
+          "approximatePosition": "全篇约 18/36 页；先按章节标题定位，再核对原文锚点。",
+          "bodyParagraphIndex1": 238,
+          "endBoundary": "到第七章评审方法之前；第七章从渲染第33页中部开始，该页上半部仍有格式10的落款。"
+        },
+        "volumes": [
+          "正文要求投标文件正本壹份；格式章使用统一封面与目录，未见另外分册要求。"
+        ],
+        "forms": [
+          "投标文件封面",
+          "格式1：承诺函",
+          "格式2：投标函",
+          "格式3：法定代表人/单位负责人授权书",
+          "格式4：承诺函（资格条件）",
+          "格式5：投标人基本情况表（实质性要求）",
+          "格式6：投标人和投标产品其他资格、资质性及其他类似效力要求的相关证明材料",
+          "格式7：报价一览表（实质性要求）",
+          "格式8：投标产品技术参数响应表（实质性要求）",
+          "格式9：商务应答表（实质性要求）",
+          "格式10：类似项目业绩一览表"
+        ],
+        "features": [
+          "正文6张表，含横向与纵向合并单元格。",
+          "使用XXXX、XXXXXXXX等文字占位符，授权书一段内有多个同字占位；不能按整个段落视为一个空。",
+          "报价一览表有空白重复行，金额单位万元；备注栏为解释说明，不作为必填项。",
+          "格式章后另有第七章评审方法；第33页同时含格式10落款与第七章标题，复制不能简单按整页截取。",
+          "目录标格式章12页；本机渲染PDF第18页、印刷页16。",
+          "所选授权书第23页注1按供应商类型分支：法人单位用法定代表人授权书，其他组织用单位负责人授权书，自然人改交身份证明材料。"
+        ],
+        "selectedFormApplicability": [
+          {
+            "formId": "authorization",
+            "source": {
+              "anchor": "供应商为法人单位时提供“法定代表人授权书”，供应商为其他组织时提供“单位负责人授权书”，供应商为自然人时提供“自然人身份证明材料”。",
+              "position": "本格式下方“注”第1条",
+              "renderedPage1": 23
+            },
+            "alternativeRequirement": "供应商为自然人时，改提供“自然人身份证明材料”。"
+          }
+        ]
+      },
+      "labels": "labels/sccc-property-2022.json"
+    },
+    {
+      "id": "forestry-construction-2024",
+      "title": "国家林业和草原局卫星林业应用中心电力改造项目施工招标",
+      "category": "works",
+      "purchaser": {
+        "name": "国家林业和草原局林草调查规划院",
+        "type": "中央事业单位"
+      },
+      "source": {
+        "publisher": "国家林业和草原局",
+        "pageUrl": "https://www.forestry.gov.cn/lyj/1/gkzfzbgg/20240904/584180.html",
+        "downloadUrl": "https://www.forestry.gov.cn/u/cms/www/202409/041757124ad2.pdf",
+        "publishedOn": "2024-09-04",
+        "verifiedOn": "2026-11-16",
+        "verification": "国家林草局官方中标公告附件2直接链接本PDF；原文招标编号0733-24191510、招标人和项目名称与公告一致。PDF含文本层，作为只读格式识别对照，不要求重建Word。"
+      },
+      "downloadedOn": "2026-11-16",
+      "file": {
+        "relativePath": "forestry-construction-2024/tender.pdf",
+        "sourceFileName": "国家林业和草原局卫星林业应用中心电力改造项目招标文件-定稿.pdf",
+        "sha256": "5d46afbfef24ad90c13cac2e0342ae29251790507b7d393a7c1a9a8a2e983fb2",
+        "bytes": 2296614,
+        "format": "pdf"
+      },
+      "structure": {
+        "formatSection": {
+          "title": "第八章 投标文件格式",
+          "renderedPage1": 161,
+          "printedPage": "160",
+          "tocPage": "160",
+          "approximatePosition": "全篇约 161/192 页；先按章节标题定位，再核对原文锚点。",
+          "endBoundary": "第八章到文末（PDF第192页），后部为资格审查与其他材料。"
+        },
+        "volumes": [
+          "招标文件分四卷，格式在第四卷。投标文件正、副本分别装订、包装；未要求另行商务/技术分册。"
+        ],
+        "forms": [
+          "投标文件封面",
+          "一、投标函及投标函附录（含投标函、投标函附录）",
+          "二、法定代表人身份证明",
+          "二、授权委托书",
+          "三、联合体协议书（本项目不适用）",
+          "四、投标保证金",
+          "五、已标价工程量清单",
+          "六、施工组织设计",
+          "附表一：拟投入本标段的主要施工设备表",
+          "附表二：拟配备本项目的试验和检测仪器设备表",
+          "附表三：劳动力计划表",
+          "附表四：计划开、竣工日期和施工进度网络图",
+          "附表五：施工总平面图",
+          "附表六：临时用地表",
+          "七、项目管理机构（含项目管理机构组成表、主要人员简历表）",
+          "八、拟分包项目情况表（本项目不适用）",
+          "九、资格审查资料",
+          "十、其他材料"
+        ],
+        "features": [
+          "PDF文本层可提取，正文有横向多列表及附表；不据PDF推断Word合并单元格或嵌套结构。",
+          "投标函同句包括开工日期、竣工天数、质量标准及安全等级多处留白。",
+          "表格与目录保留原文编号重复的二；目录写如有，正文联合体协议书和分包表明确本项目不适用。",
+          "印刷160页对应PDF第161页；源PDF与LibreOffice Draw重导的章节首页已对照。"
+        ]
+      },
+      "labels": "labels/forestry-construction-2024.json"
+    }
+  ],
+  "golden": {
+    "id": "golden-template",
+    "inputEnv": "SEAL_GOLDEN_DOC",
+    "sha256": "b2b444a53aa91864b33b847fb0a015d411b716ddf653a6aa2bd7be58a11cf87c",
+    "format": "doc",
+    "structure": {
+      "formatSection": {
+        "title": "第六章 投标文件格式",
+        "renderedPage1": 85,
+        "printedPage": "83",
+        "tocPage": "54",
+        "approximatePosition": "全篇约 85/118 页；先按章节标题定位，再核对原文锚点。",
+        "bodyParagraphIndex1": 1388,
+        "endBoundary": "格式章节到文末（本机渲染第118页）。"
+      },
+      "volumes": [
+        "格式包含资格证明与技术部分；纸质版线装或胶装，未见另外分册要求。"
+      ],
+      "forms": [
+        "投标文件封面",
+        "开标（唱标）一览表",
+        "目录（投标人自行编写）",
+        "一、投标函及投标函附录（含投标函、投标函附录）",
+        "二、投标保证书",
+        "三、资格证明文件",
+        "3.1 投标人基本情况表",
+        "3.2 企业证照",
+        "3.3 资质证书",
+        "3.4 项目负责人简历表",
+        "3.5 法定代表人身份证明书",
+        "3.6 法定代表人授权委托书",
+        "3.7 关于投标和投标人资格承诺书",
+        "3.8 其他资格证明材料",
+        "四、投标文件技术部分",
+        "4.1 投标产品技术参数说明",
+        "4.2 技术规格偏离表",
+        "4.3 商务条款偏离表",
+        "4.4 供货实施方案",
+        "4.5 质保期承诺",
+        "4.6 质量承诺及保证措施",
+        "4.7 售后服务",
+        "4.8 类似业绩一览表",
+        "4.9 其他资料"
+      ],
+      "features": [
+        "原格式为二进制.doc；只在临时工作副本中由LibreOffice转换为.docx后检查。",
+        "转换副本正文24张表，含横向与纵向合并；含2个文本框、1个内容控件与多份页眉。",
+        "存在□、☑与口等字符；字符计数不等于复选控件数量，也不判定是否待填。",
+        "开标表含金额、税率、交货天数及三个不同质保/维保年限空，供货地点和质量标准已预填。",
+        "目录标54页；本机转换渲染为PDF第85页、印刷页83，不能以目录坐标写死。",
+        "所选授权书续页末注明确：法定代表人本人签署时授权书可不填写，但须注明“投标文件由法定代表人签署，无委托授权”；跳过空白不能遗漏替代要求。"
+      ],
+      "selectedFormApplicability": [
+        {
+          "formId": "authorization",
+          "source": {
+            "anchor": "若投标文件由投标单位的法定代表人本人进行签署的，此《法定代表人授权委托书》可不填写，只需注明“投标文件由法定代表人签署，无委托授权”即可。",
+            "position": "本格式续页末尾“注”",
+            "renderedPage1": 103
+          },
+          "alternativeRequirement": "注明“投标文件由法定代表人签署，无委托授权”。"
+        }
+      ]
+    },
+    "labels": "labels/golden-template.json"
+  }
+}

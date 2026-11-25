@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.tmp/
+.playwright-cli/
+.DS_Store
+*.pyc
+__pycache__/

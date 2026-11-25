@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "luoding-tax-property-2023",
+  "normalization": "ignore-whitespace",
+  "forms": [
+    {
+      "id": "authorization",
+      "title": "2.2.2 法定代表人授权委托书",
+      "renderedPage1": 73,
+      "fields": [
+        {
+          "id": "agent-name",
+          "anchor": "兹授权",
+          "position": "本格式内，锚点后至“女士/小姐/先生”前的空白",
+          "meaning": "被授权代表姓名"
+        },
+        {
+          "id": "authority",
+          "anchor": "（填写投标、参与开标、签署合同等）",
+          "position": "本格式内，提示括号之后、句号之前的空白",
+          "meaning": "授权权限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "bidder",
+          "anchor": "投标人名称（单位盖公章）：",
+          "position": "本格式内，冒号后的留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "legal-signature",
+          "anchor": "法定代表人（签名或盖私章）：",
+          "position": "本格式内，冒号后签署区",
+          "meaning": "法定代表人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "issue-date",
+          "anchor": "签发日期：",
+          "position": "本格式内，年、月、日前的三个空白合为一项",
+          "meaning": "签发日期"
+        },
+        {
+          "id": "agent-sex",
+          "anchor": "附：授权代表性别：",
+          "position": "本格式内，冒号后到年龄标签前",
+          "meaning": "被授权人性别"
+        },
+        {
+          "id": "agent-age",
+          "anchor": "年龄：",
+          "position": "本格式内，冒号后到职务标签前",
+          "meaning": "被授权人年龄"
+        },
+        {
+          "id": "agent-role",
+          "anchor": "职务：",
+          "position": "本格式内，冒号后留白",
+          "meaning": "被授权人职务"
+        },
+        {
+          "id": "agent-id",
+          "anchor": "身份证号码：",
+          "position": "本格式内，冒号后到联系电话标签前",
+          "meaning": "被授权人证件号"
+        },
+        {
+          "id": "agent-phone",
+          "anchor": "联系电话：",
+          "position": "本格式内，冒号后留白",
+          "meaning": "被授权人电话"
+        }
+      ],
+      "coverage": {
+        "scope": "本格式适用时，逐项覆盖姓名、权限、单位、签署、签发日期及代表信息；原文120天为固定值。",
+        "excluded": [
+          "身份证正反面图片挂载区按证明材料处理，不计文字空白召回分母。",
+          "女士/小姐/先生为原文并列称谓，不作为强制勾选；固定有效期限120天不纳入。",
+          "整表免交条件见applicability；条件成立时全部10处填写位置继承不适用状态，完整标签仍保留，统计另报跳过原因。"
+        ]
+      },
+      "applicability": {
+        "notRequiredWhen": "投标签字代表为法定代表人",
+        "source": {
+          "anchor": "若投标签字代表为法定代表人，则无需提供本授权委托书",
+          "position": "本格式末尾“--备注--”第2条",
+          "renderedPage1": 73
+        }
+      }
+    },
+    {
+      "id": "opening-price",
+      "title": "5.1 开标一览表",
+      "renderedPage1": 90,
+      "fields": [
+        {
+          "id": "amount-numeric",
+          "anchor": "小写：",
+          "position": "本格式表格内，冒号后留白",
+          "meaning": "人民币投标总价小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "amount-words",
+          "anchor": "大写：",
+          "position": "本格式表格内，冒号后留白",
+          "meaning": "人民币投标总价大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "bidder",
+          "anchor": "投标人名称（单位盖公章）：",
+          "position": "本格式内，表格下方冒号后留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "date",
+          "anchor": "日期：",
+          "position": "本格式内，年、月、日前的三个空白合为一项",
+          "meaning": "签署日期"
+        },
+        {
+          "id": "remarks",
+          "anchor": "备注",
+          "position": "本格式表格中备注标题对应的留白，不取正文说明",
+          "meaning": "补充说明",
+          "requiredWhen": "需要补充说明"
+        }
+      ],
+      "coverage": {
+        "scope": "逐项覆盖本表金额大小写、落款单位与日期。 另列条件适用的备注格。",
+        "excluded": [
+          "服务期、项目名、项目编号已预填，不纳入待填位置。"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,238 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "forestry-construction-2024",
+  "normalization": "ignore-whitespace",
+  "forms": [
+    {
+      "id": "bid-letter",
+      "title": "（一）投标函",
+      "renderedPage1": 164,
+      "fields": [
+        {
+          "id": "purchaser",
+          "anchor": "致：",
+          "position": "本格式第一行，到(招标人名称)前空白",
+          "meaning": "招标人名称"
+        },
+        {
+          "id": "project",
+          "anchor": "在考察现场并充分研究",
+          "position": "本格式首句，到（专业承包工程名称）前空白",
+          "meaning": "专业承包工程名称"
+        },
+        {
+          "id": "amount-words",
+          "anchor": "人民币（大写）：",
+          "position": "本格式内冒号后留白；PDF折行合并定位",
+          "meaning": "投标价格大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "amount-numeric",
+          "anchor": "RMB￥：",
+          "position": "本格式内首处金额空白，不取后续分项费用",
+          "meaning": "投标价格小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "commencement",
+          "anchor": "如果我方中标，我方保证在",
+          "position": "本格式内年、月、日三个分量的留白合为一项",
+          "meaning": "开工日期",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "duration",
+          "anchor": "天（日历日）内竣工",
+          "position": "本格式内，该锚点之前留白",
+          "meaning": "施工天数",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "quality",
+          "anchor": "并确保工程质量达到",
+          "position": "本格式内，到标准前的留白",
+          "meaning": "工程质量标准",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "safety",
+          "anchor": "确保施工现场安全生产标准化管理目标达到",
+          "position": "本格式内，到等级前的留白",
+          "meaning": "安全生产标准化等级",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "civilized-safety-fee",
+          "anchor": "安全文明施工费(含税)RMB￥：",
+          "position": "本函对应分项费，元前留白",
+          "meaning": "安全文明施工费",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "waste-transport-fee",
+          "anchor": "建筑垃圾运输处置费(含税)RMB￥：",
+          "position": "本函对应分项费，元前留白",
+          "meaning": "建筑垃圾运输处置费",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "acceleration-fee",
+          "anchor": "赶工增加费(含税)RMB￥（如有）：",
+          "position": "本函对应分项费，元前留白；PDF折行合并定位",
+          "meaning": "赶工增加费",
+          "requiresHumanDecision": true,
+          "requiredWhen": "存在赶工增加费"
+        },
+        {
+          "id": "worker-insurance-fee",
+          "anchor": "农民工工伤保险费 RMB￥：",
+          "position": "本函对应分项费，元前留白",
+          "meaning": "农民工工伤保险费",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "provisional-sum",
+          "anchor": "（含税）合计金额 RMB￥：",
+          "position": "本函暂列金额行，元前留白",
+          "meaning": "暂列金额",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "deposit-words",
+          "anchor": "金额为人民币（大写）：",
+          "position": "本函保证金句内，大写留白",
+          "meaning": "投标保证金大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "deposit-numeric",
+          "anchor": "（￥：",
+          "position": "本函保证金句内，小写金额留白",
+          "meaning": "投标保证金小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "manager",
+          "anchor": "我方拟派的项目经理",
+          "position": "本函该句，到（姓名）前空白",
+          "meaning": "拟派项目经理姓名"
+        },
+        {
+          "id": "manager-id",
+          "anchor": "身份证号：",
+          "position": "本函该句，逗号前空白",
+          "meaning": "项目经理证件号"
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投标人：",
+          "position": "本函末尾盖单位章前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "signatory",
+          "anchor": "法人代表或委托代理人（签字）：",
+          "position": "本函末尾签署处；PDF折行合并定位",
+          "meaning": "有权代表签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "date",
+          "anchor": "日 期：",
+          "position": "本函续页165，年月日分量的空白合为一项",
+          "meaning": "签署日期"
+        }
+      ],
+      "coverage": {
+        "scope": "覆盖本函跨两页的全部文字填写片段：名称、总价与五项分项费、进度/质量/安全承诺、保证金、经理身份、落款与日期。",
+        "excluded": [
+          "安全文明费等金额即使为零也保留标签；如有的赶工增加费标为条件适用。",
+          "行末排版点号与换行不另作字段；法人代表签署由人完成。"
+        ]
+      }
+    },
+    {
+      "id": "authorization",
+      "title": "二、授权委托书",
+      "renderedPage1": 169,
+      "fields": [
+        {
+          "id": "legal-name",
+          "anchor": "本人",
+          "position": "本格式首句，到（姓名）前留白",
+          "meaning": "法定代表人姓名"
+        },
+        {
+          "id": "bidder",
+          "anchor": "（姓名）系",
+          "position": "本格式首句，到（投标人名称）前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "agent",
+          "anchor": "现委托",
+          "position": "本格式首句，到（姓名）前留白",
+          "meaning": "代理人姓名"
+        },
+        {
+          "id": "project",
+          "anchor": "修改",
+          "position": "本格式内，到（工程名称）前留白",
+          "meaning": "工程名称"
+        },
+        {
+          "id": "term",
+          "anchor": "委托期限：",
+          "position": "本格式内，冒号后到句号前空白",
+          "meaning": "授权期限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "legal-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，法定代表人之后第一处",
+          "meaning": "法定代表人证件号"
+        },
+        {
+          "id": "agent-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，委托代理人之后第二处",
+          "meaning": "委托代理人证件号"
+        },
+        {
+          "id": "date",
+          "anchor": "年 月 日",
+          "position": "本格式末尾日期分量留白，合为一项",
+          "meaning": "签署日期"
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投标人：",
+          "position": "本格式末尾盖单位章前留白",
+          "meaning": "落款投标人名称"
+        },
+        {
+          "id": "legal-signature",
+          "anchor": "法定代表人：",
+          "position": "本格式末尾签署处",
+          "meaning": "法定代表人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "agent-signature",
+          "anchor": "委托代理人：",
+          "position": "本格式末尾签署处",
+          "meaning": "代理人签署",
+          "completion": "human-signature"
+        }
+      ],
+      "coverage": {
+        "scope": "逐项覆盖首句四处、期限、三个落款签署、两个证件号和日期。",
+        "excluded": [
+          "法定代表人身份证明为相邻的独立格式，未纳入；本函附证明的图片不计文字空白分母。"
+        ]
+      }
+    }
+  ]
+}

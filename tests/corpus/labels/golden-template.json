@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "golden-template",
+  "normalization": "ignore-whitespace",
+  "forms": [
+    {
+      "id": "opening-price",
+      "title": "开标（唱标）一览表",
+      "renderedPage1": 87,
+      "fields": [
+        {
+          "id": "amount-numeric",
+          "anchor": "小写：",
+          "position": "本格式含税投标总价对应单元格的留白",
+          "meaning": "含税投标总价小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "amount-words",
+          "anchor": "大写：",
+          "position": "本格式含税投标总价对应单元格的留白",
+          "meaning": "含税投标总价大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "tax-rate",
+          "anchor": "增值税税率",
+          "position": "本格式对应单元格，%前的留白",
+          "meaning": "增值税税率",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "delivery-days",
+          "anchor": "合同签订之日起",
+          "position": "本格式交货时间单元格，日历天前的留白",
+          "meaning": "交货天数",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "whole-warranty",
+          "anchor": "整机质保不少于",
+          "position": "本格式质保期单元格，第一个年前的留白",
+          "meaning": "整机质保年限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "parts-warranty",
+          "anchor": "监督检验合格起不得低于",
+          "position": "本格式质保期单元格，第二个年前的留白",
+          "meaning": "主要部件和安全保护装置质保年限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "free-maintenance",
+          "anchor": "后续免费维保期限不得低于",
+          "position": "本格式质保期单元格，第三个年前的留白",
+          "meaning": "免费维保年限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投 标 人：",
+          "position": "本格式表后落款盖公章前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "signatory",
+          "anchor": "法定代表人或其委托代理人：",
+          "position": "本格式表后签字或盖章前留白",
+          "meaning": "有权代表签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "date",
+          "anchor": "日期：",
+          "position": "本格式续页88，年月日分量空白合为一项",
+          "meaning": "签署日期"
+        }
+      ],
+      "coverage": {
+        "scope": "覆盖本表七处报价/承诺及三个落款位置。",
+        "excluded": [
+          "项目名、编号、供货地点、质量标准均为预填原文，不纳入。",
+          "没有将三个年限空合并成一个标签；签章由人完成。"
+        ]
+      }
+    },
+    {
+      "id": "authorization",
+      "title": "3.6 法定代表人授权委托书",
+      "renderedPage1": 102,
+      "fields": [
+        {
+          "id": "legal-name",
+          "anchor": "本授权委托书声明",
+          "position": "本格式首句，到（姓名）前留白",
+          "meaning": "法定代表人姓名"
+        },
+        {
+          "id": "bidder",
+          "anchor": "（姓名） 系",
+          "position": "本格式首句，到（投 标 人 名 称）前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "agent-company",
+          "anchor": "现授权委托",
+          "position": "本格式首句，到（单 位 名 称）前留白",
+          "meaning": "代理人单位名称"
+        },
+        {
+          "id": "agent",
+          "anchor": "（单 位 名 称）的",
+          "position": "本格式首句，到（姓名）前留白",
+          "meaning": "代理人姓名"
+        },
+        {
+          "id": "project",
+          "anchor": "修改",
+          "position": "本格式首句，到（项目名称）前留白",
+          "meaning": "项目名称"
+        },
+        {
+          "id": "legal-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，法定代表人之后第一处",
+          "meaning": "法定代表人证件号"
+        },
+        {
+          "id": "agent-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，委托代理人之后第二处",
+          "meaning": "委托代理人证件号"
+        },
+        {
+          "id": "date",
+          "anchor": "日期：",
+          "position": "本格式末尾年、月、日三个分量的留白合为一项",
+          "meaning": "签署日期"
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投 标 人：",
+          "position": "本格式末尾盖公章前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "legal-signature",
+          "anchor": "法定代表人：",
+          "position": "本格式末尾签字或盖章前留白",
+          "meaning": "法定代表人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "agent-signature",
+          "anchor": "委托代理人：",
+          "position": "本格式末尾签字或盖章前留白",
+          "meaning": "代理人签署",
+          "completion": "human-signature"
+        }
+      ],
+      "coverage": {
+        "scope": "本格式适用时，逐项覆盖首句五处、三个落款、两个证件号及日期。",
+        "excluded": [
+          "代理人身份证正反面图片不计文字空白分母。",
+          "整表可不填写的条件及必须注明的无委托授权声明见applicability；该固定声明不是原表待填空白，不计本轮位置分母，但不能因跳过11处标签而遗漏。"
+        ]
+      },
+      "applicability": {
+        "notRequiredWhen": "投标文件由投标单位的法定代表人本人进行签署",
+        "source": {
+          "anchor": "若投标文件由投标单位的法定代表人本人进行签署的，此《法定代表人授权委托书》可不填写，只需注明“投标文件由法定代表人签署，无委托授权”即可。",
+          "position": "本格式续页末尾“注”",
+          "renderedPage1": 103
+        },
+        "alternativeRequirement": "注明“投标文件由法定代表人签署，无委托授权”。"
+      }
+    }
+  ]
+}

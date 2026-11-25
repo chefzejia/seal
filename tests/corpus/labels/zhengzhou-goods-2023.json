@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "sampleId": "zhengzhou-goods-2023",
+  "normalization": "ignore-whitespace",
+  "forms": [
+    {
+      "id": "authorization",
+      "title": "2. 企业法定代表人授权书",
+      "renderedPage1": 60,
+      "fields": [
+        {
+          "id": "legal-name",
+          "anchor": "本人",
+          "position": "仅第六章本格式内，至（姓名）前留白；不取合同章同名授权书",
+          "meaning": "法定代表人姓名"
+        },
+        {
+          "id": "bidder-in-sentence",
+          "anchor": "（姓名）系",
+          "position": "本格式首句，至（投标人名称）前留白",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "agent-name",
+          "anchor": "现委托",
+          "position": "本格式首句，至（姓名）前留白",
+          "meaning": "代理人姓名"
+        },
+        {
+          "id": "project",
+          "anchor": "修改",
+          "position": "本格式首句，至（项目名称）前留白",
+          "meaning": "投标项目名称"
+        },
+        {
+          "id": "term",
+          "anchor": "委托期限：",
+          "position": "本格式内，冒号后至句号前留白",
+          "meaning": "授权期限",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "legal-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，法定代表人之后出现的第一处",
+          "meaning": "法定代表人证件号"
+        },
+        {
+          "id": "agent-id",
+          "anchor": "身份证号码：",
+          "position": "本格式签署区，授权委托代理人之后出现的第二处",
+          "meaning": "代理人证件号"
+        },
+        {
+          "id": "date",
+          "anchor": "年 月 日",
+          "position": "本格式末尾三个日期分量的留白，合为一项",
+          "meaning": "签署日期"
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投 标 人：",
+          "position": "本格式末尾冒号后留白",
+          "meaning": "落款投标人名称"
+        },
+        {
+          "id": "legal-signature",
+          "anchor": "法定代表人：",
+          "position": "本格式末尾签字处",
+          "meaning": "法定代表人签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "agent-signature",
+          "anchor": "授权委托代理人：",
+          "position": "本格式末尾签字处",
+          "meaning": "授权代理人签署",
+          "completion": "human-signature"
+        }
+      ],
+      "coverage": {
+        "scope": "本格式适用时，仅第六章企业法定代表人授权书；逐项覆盖首句四处、期限、三处落款、两个证件号及日期。",
+        "excluded": [
+          "第六章相邻的法定代表人身份证明为另一个格式，未纳入。",
+          "合同章节的授权委托书未纳入；身份证证明图片按附件处理。",
+          "整表按第59页二、总标题所列分支选用；全部字段继承applicability，不能从代表身份或空白自行猜测分支。"
+        ]
+      },
+      "applicability": {
+        "requiredWhen": "本次采用“附有法定代表人身份证明的企业法定代表人授权书”分支",
+        "notRequiredWhen": "本次采用“法定代表人身份证明”分支",
+        "source": {
+          "anchor": "二、法定代表人身份证明或附有法定代表人身份证明的企业法定代表人授权书",
+          "position": "相邻第59页的二、总标题；第60页为其第2项授权书",
+          "renderedPage1": 59
+        }
+      }
+    },
+    {
+      "id": "opening-price",
+      "title": "三、投标一览表",
+      "renderedPage1": 61,
+      "fields": [
+        {
+          "id": "project",
+          "anchor": "项目名称：",
+          "position": "本格式标题下，冒号后留白",
+          "meaning": "项目名称"
+        },
+        {
+          "id": "project-number",
+          "anchor": "采购项目编号：",
+          "position": "本格式标题下，冒号后留白",
+          "meaning": "采购项目编号"
+        },
+        {
+          "id": "bidder",
+          "anchor": "投标人",
+          "position": "本格式表格首列投标人/名称表头下方纵向合并的空格，不取表后落款",
+          "meaning": "投标人名称"
+        },
+        {
+          "id": "amount-words",
+          "anchor": "大写：",
+          "position": "本格式表格总报价单元格内，冒号后留白",
+          "meaning": "投标总报价大写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "amount-numeric",
+          "anchor": "小写：",
+          "position": "本格式表格总报价单元格内，冒号后留白",
+          "meaning": "投标总报价小写",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "delivery",
+          "anchor": "交货期",
+          "position": "本格式表格，该列下方空格",
+          "meaning": "交货期",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "delivery-location",
+          "anchor": "交货地点",
+          "position": "本格式表格，该列下方空格",
+          "meaning": "交货地点"
+        },
+        {
+          "id": "quality",
+          "anchor": "质量要求",
+          "position": "本格式表格，该列下方空格",
+          "meaning": "质量要求响应",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "warranty",
+          "anchor": "质保期",
+          "position": "本格式表格，该列下方空格",
+          "meaning": "质保期",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "validity",
+          "anchor": "投标有效期",
+          "position": "本格式表格，该行空格",
+          "meaning": "投标有效期响应",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "deposit",
+          "anchor": "投标保证金",
+          "position": "本格式表格，该行万元前留白",
+          "meaning": "保证金金额",
+          "requiresHumanDecision": true
+        },
+        {
+          "id": "content",
+          "anchor": "投标内容",
+          "position": "本格式表格，该行空格",
+          "meaning": "投标范围"
+        },
+        {
+          "id": "bidder-signature-block",
+          "anchor": "投标人：（盖章）",
+          "position": "本格式表后落款处，单位名称应与表内同一主体一致",
+          "meaning": "落款投标人名称"
+        },
+        {
+          "id": "signatory",
+          "anchor": "法定代表人或其委托代理人：",
+          "position": "本格式表后签字或盖章处",
+          "meaning": "有权代表签署",
+          "completion": "human-signature"
+        },
+        {
+          "id": "date",
+          "anchor": "年 月 日",
+          "position": "本格式表后末尾三个日期分量留白，合为一项",
+          "meaning": "签署日期"
+        },
+        {
+          "id": "remarks",
+          "anchor": "备 注",
+          "position": "本格式表格中备注标题对应的留白，不取正文说明",
+          "meaning": "补充说明",
+          "requiredWhen": "需要补充说明"
+        }
+      ],
+      "coverage": {
+        "scope": "逐项覆盖本表表头前的项目、编号、合并单元格的单位/金额/交货/质量/质保、后四行及落款。 另列条件适用的备注格。",
+        "excluded": [
+          "纵向合并续格的空XML单元格不另计填写位置；签章由人完成。"
+        ]
+      }
+    }
+  ]
+}
