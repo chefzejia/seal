@@ -1,9 +1,11 @@
-<!-- reviewed-through: d868b10e1d0cdb143ca1f495819dedbc39f9f117 -->
+<!-- reviewed-through: d16fd4d630007927c3d94b9b1d1b9ccced12c751 -->
 # Lessons from Merged Work
 
 ## Active Lessons
 
 现行契约优先；疑似空白只作提示，未确认与原文改动只报告，合法草稿仍可输出。
+
+- **确定性文档核验、模板锁状态转换与前端异步确认链须消除全部降级放行与并发竞态**：#42 两阶段编制大纲（`outline.json` + `C17`）经四轮异源 `gpt-auditor` 与独立解包探针检出并根治七类共性深层隐患：① 保护性字段（如 `lockedTemplate`）绝不能仅靠单入口的增量检查，必须以统一的 `assertLockedTemplateTransitions(previous, next)` 覆盖 `update`/`delete`/`patch`/`save`/`outlineSave`，防省略字段或翻转 `optional: true` 绕过；② 核对正文章节存在性不得依赖含 TOC 域缓存与 `w:vanish`/`w:webHidden` 隐藏文字的通用检索视图，须直接从正文与表格 XML 剔除 TOC 域（`w:fldChar`/`w:fldSimple`）与隐藏 run；③ 核验绑定的 KB 附件必须仅在目标 `_Seal_*` 书签范围内匹配预期图片哈希、不可退回分册全局媒体池，且任意原图缺失/部分读取失败须先于 `requireMedia` 返回 fail-closed 错误；④ 已绑定的非图片材料（`.txt`/`.md`/`.docx`）不可只检文件可读就放行，须核验活跃 `{{quote:...}}` 写入；⑤ 输出路径防符号链接穿越须逐段 `lstat`+`realpath` 校验目标目录（不只校验源文件），PDF 自动转页须显式检查 `truncatedPages` 绝不静默丢页；⑥ 空分册（`volumes.length === 0`）分支须同样将未解决的 `ledger.integrityIncident` 计入 `C15`；⑦ 编辑器「保存→确认→发指令」异步链应抽离为共享纯控制器（`runOutlineConfirmFlow`），在保存与确认两个在途窗口均核对单调编辑序号防止旧快照覆写/误发，并以受控延迟 Promise 驱动真实流程测试（严禁源码正则假测试）。证据 `.tmp/evidence/milestone-42/gpt-audit-{s1,s2,r2,r3,r4}.md`、`.tmp/evidence/milestone-42/tester/` 与提交 `d16fd4d`。 (Seen 1×)
 
 - **PDFium WASM 渲染必须显式开启表单/签章外观，且渲染单测须校验真实像素内容**：#41 以 MIT 协议 `@hyzyla/pdfium@^3.0.0` 替换外部 Poppler 后，异源 `gpt-auditor` 实测检出两项关键实战隐患：① PDFium 3.0.0 的 `page.render()` 默认 `renderFormFields: false`，会导致电子证照、社保凭证与电子合同中 `/Subtype /Widget`（数字签名红章、表单文本框与勾选框）外观流完全消失（红色像素为 0），必须显式传 `renderFormFields: true` 并用串行队列守护单一 Emscripten WASM 堆、在 `try/finally` 中严格释放 `page.close()`/`document.destroy()`；② 仅校验输出 PNG 可解码与尺寸大于零无法拦截空白图/丢章回归，必须通过 `sharp().ensureAlpha().raw()` 断言预期色彩像素区与背景区，并保持根包与插件包 `engines.node` 与运行时依赖下限一致（`>=22.0.0`）。证据 `.tmp/evidence/milestone-41/gpt-audit-{5df51c2,d868b10}.md` 与提交 `5df51c2`/`d868b10`。 (Seen 1×)
 

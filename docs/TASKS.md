@@ -7,7 +7,7 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
 2. 本轮解耦：#25 改为 `superseded (by #31)`，#26 改为 `superseded (by #32)`；#27 的前置 #26 按 [ROLES.md](ROLES.md) 自动改看 #32（及合并真机验收 #33）。
 3. 协作拓扑升级（2026-11-22）：日常实现与独立终端验证由 Antigravity Brain + 原生 Swarm 闭环；`.git/hooks/post-commit` 改为仅在新增 `Executor: gpt-cua` 且 `Status: pending` 的大节点集中真机验收里程碑时唤醒 GPT Router（只读源码、不改业务代码）。#31 与 #32 的全量代码、独立 Swarm Tester 终端验证与异源 `gpt-auditor` 审计已在 `1f6f079` 闭环并统一冻结为 `dist/seal-dsh-0.1.329.tgz`，现派发 `#33`（`Executor: gpt-cua`）执行一次合批真实 DSH Desktop Final CUA 验收。
 
-**执行顺序：#29–#41、#27 全部 `verified`（且已于 `b39810c` 完成公开仓脱敏与公网 npm `seal-dsh@0.1.604` 交付）；当前派发 `#42`（两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算）。**
+**执行顺序：#29–#42、#27 全部 `verified`；最新里程碑 `#42` 已线性合入 `main`（`d16fd4d`）并冻结本地包 `dist/seal-dsh-0.1.629.tgz`，待用户确认是否推送远端并发布公网 npm 新版。**
 
 ## Router 冷启动与执行边界
 
@@ -41,13 +41,13 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
 - **资料与权限**：用户本地招标文件、企业母本与知识库原件永久只读。测试的 `SEAL_HOME` 指向 `.tmp/` 下的临时目录，不读写真实的 `~/.seal`。界面与安装验收使用真实 DSH Desktop Profile，可以安装本项目新包并按需重启 DSH，保留用户已有的配置、会话与其他插件，不授予兼容性豁免。
 - **公开语料**：#22 下载的公开招标文件只存放在 `.tmp/corpus/`，不进仓库，样本信息不进 `src/**` 与 `scripts/**`。
 
-## 当前状态（2026-11-26 16:46）
+## 当前状态（2026-11-26 18:42）
 
 | 观察面 | 事实 |
 | :--- | :--- |
-| 已完成 | #22、#28、#29、#30、#31、#32、#33、#27、#34、#35、#36、#37、#38、#39、#40、#41 全部 `verified`；`b39810c` 已公开脱敏仓库并发布公网 `seal-dsh@0.1.604`（npm + DSH 市场索引 + GitHub Release）。 |
-| 进行中 | **#42（两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算）**，已冻结契约，分 2 个实现切片 + 独立验收/实屏验收/异源审计推进。 |
-| 审计水位 | `d868b10e1d0cdb143ca1f495819dedbc39f9f117`（见 [LESSONS.md](LESSONS.md) 首行 `reviewed-through`）。 |
+| 已完成 | #22、#28–#41、#27 与 **#42（`d16fd4d`，`dist/seal-dsh-0.1.629.tgz`，`516/516` + `16/16` + `m42-tester` 两轮 `PASS` + `gpt-auditor` 四轮终审 `NO_ISSUES`）** 全部 `verified`。 |
+| 下一步 | 已在本地安装 `seal-dsh@0.1.629` 至本机 Desktop Profile 供即时体验；待用户实测确认后按需推送 `origin/main` 并发布 `seal-dsh@0.1.629` 至公网 npm / DSH 市场索引 / GitHub Release。 |
+| 审计水位 | `d16fd4d630007927c3d94b9b1d1b9ccced12c751`（见 [LESSONS.md](LESSONS.md) 首行 `reviewed-through`）。 |
 
 真实只读输入（只在测试输入与本调度板出现）：
 
@@ -456,8 +456,11 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
 
 ## [Milestone #42] 两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算
 
-- **Status**: pending
+- **Status**: verified
+- **Verified-Commit**: d16fd4d630007927c3d94b9b1d1b9ccced12c751
+- **Updated**: 2026-11-26
 - **Depends-On**: #41
+- **独立验收**：冻结安装包 `dist/seal-dsh-0.1.629.tgz`（SHA256 `279f870bb54b35e95e259f643f8cb1d18827b2be0e1291120bbeeed242b4358d`，已安装至本机 `~/.dsh/profiles/desktop`，`npm run dsh:doctor` 零测试残余与死锁）；契约冻结 `9fb2d0f` + 完整实现与四轮审计加固线性 Squash 合入 `d16fd4d`；`npm run verify` **516/516 PASS**、`tests/dsh-bundle.test.ts` **16/16 PASS**（真实 Electron ASAR SDK 含 `seal_outline` 与 `C17` 实测）、2 项 `Broken by hand` 红→绿；独立 Swarm Tester（`m42-tester`）两轮解包对抗探针（`.tmp/evidence/milestone-42/tester/report.md` 与 `retest-623/report.md`，含 `zh`/`en` 394 键对齐、零 Poppler PDFium 多页转图、删图 C17 复现、符号链接穿越拦截、超页 PDF fail-closed、空分册台账伪造入 C15）全部 **`PASS`**；跨模型 `gpt-auditor`（`effort=high`）四轮实证审计（`.tmp/evidence/milestone-42/gpt-audit-{s1,s2,r2,r3,r4}.md`）发现的 `lockedTemplate` 状态转换保护、TOC/`w:vanish` 排除、非图片材料 `{{quote:}}` 核验、KB 附件精确书签媒体哈希与部分缺失 fail-closed、`materials/outline` 符号链接隔离、PDF 超页 fail-closed 及共享异步 `runOutlineConfirmFlow` 并发编辑守卫全部根因修复，终审 `gpt-audit-r4.md` 为 **`NO_ISSUES`（0 P0 / 0 P1 / 0 P2）**。（注：隔离 `dsh --profile web` 验收实例启动正常，但本机内建 `webview_browser` 运行时对 `about:blank` 空脚本持续 30s 超时，自动化浏览器截屏未成行，前端打包、状态机与宿主路由已由 `dsh-bundle.test.ts` 与 `milestone42-outline-workbench.test.ts` 完整覆验，视觉排版请用户在重启本机 Desktop 后直接确认。）
 - **Scope**: `src/core/bid/**`, `src/workbench/**`, `src/shells/cli/**`, `src/shells/dsh/**`, `tests/**`
 - **用户可观测目标**：支持默认“先生成大纲 → 人工审改与当场补齐缺失材料并确认 → 再精准生成标书”的两阶段流程（同时保留“跳过大纲直接生成”快捷选项）；业务人员可在会话右栏快速确认或一键进入全宽大纲编辑器对章节做增删改查、层级调整、模板锁保护、评分项映射、当场上传/绑定证照材料与撤回重做；确认大纲后 Seal 以 C17 确定性核验草稿未漏章、未漏挂已绑定材料。
 - **行为契约**：
