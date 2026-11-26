@@ -1129,7 +1129,7 @@ export class KnowledgeBase {
     assertHealthReferenceDate(referenceDate);
     const imageMode = options?.checkImages ?? 'full';
     const subject = await this.get(vaultId, 'subject');
-    const issues = this.subjectIssues(subject), records: HealthReport['records'] = [];
+    const issues = this.subjectIssues(subject), records: HealthReport['records'] = [], materials: KbEntry[] = [];
     const entryFiles = await this.listEntryFiles(vaultId, ['record', 'material']);
     const fileCache = new Map<string, 'ok' | 'file_missing' | 'image_invalid'>();
     for (const { kind, id } of entryFiles) {
@@ -1137,6 +1137,7 @@ export class KnowledgeBase {
       try { entry = await this.get(vaultId, kind, id); }
       catch { issues.push({ code: 'entry_malformed', kind, id, message: '资料记录无法解析' }); continue; }
       if (kind !== 'record') {
+        materials.push(entry);
         issues.push(...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry, imageMode, fileCache));
         continue;
       }
@@ -1157,7 +1158,7 @@ export class KnowledgeBase {
       if (ids.length < 2) continue;
       for (const id of ids) issues.push({ code: 'record_duplicate', kind: 'record', id, field: 'number', message: `同类型同编号的重复记录：${ids.join('、')}` });
     }
-    return { vaultId, referenceDate, records, issues };
+    return { vaultId, referenceDate, records, materials, issues };
   }
 
   async search(vaultId: string, input: { query?: string; type?: string; tags?: string[]; validity?: string; referenceDate?: string; limit?: number }): Promise<Array<{ id: string; kind: KbKind; title: string; fields: KbFields; snippet: string; validity?: string }>> {

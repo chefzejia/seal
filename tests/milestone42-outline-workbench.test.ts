@@ -1465,4 +1465,64 @@ test("Outline editor KB loop: kbFiles/metadata exposure, outline_verify_kb, uplo
   assert.equal(promotedRow.resolvedEvidence.length, 1);
   assert.equal(promotedRow.resolvedEvidence[0].source, "kb");
   assert.equal(promotedRow.resolvedEvidence[0].ref, promoted.syncedKbId);
+
+  // 4. KB writing material (kind="material") resolves as ready with kbFiles & kbKind="material" (not missing!),
+  //    and subject-mismatch record maps to needs_review (invalid) rather than missing.
+  const kbMat = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "material",
+    fields: { type: "通用素材", title: "法定代表人身份证扫描件" },
+    body: "正反面扫描件",
+  });
+  await kb.save(vault.vaultId, {
+    action: "attach_file",
+    kind: "material",
+    id: kbMat.id,
+    file: { fileName: "idcard.png", bytes: PNG_1X1_RED },
+  });
+  const oemRec = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "record",
+    fields: { type: "认证证书", title: "外购防爆部件合格证", holder: "外部配件厂有限公司", validUntil: "长期" },
+    body: "",
+  });
+
+  const withMatState = (await service.outlineSave({
+    projectId: created.id,
+    expectedRevision: promoted.revision,
+    volumes: [{ name: "商务标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:2" }] }],
+    nodes: [
+      {
+        id: "n-kb-mat",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "法定代表人身份证复印件",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: kbMat.id, label: "法定代表人身份证扫描件" }],
+      },
+      {
+        id: "n-oem-mismatch",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "部件防爆合格证",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: oemRec.id, label: "外购防爆部件合格证" }],
+      },
+    ],
+  })) as any;
+
+  const matRow = withMatState.view.rows.find((r: any) => r.id === "n-kb-mat");
+  assert.equal(matRow.resolvedMaterialStatus, "ready");
+  assert.equal(matRow.resolvedEvidence[0].status, "ready");
+  assert.equal(matRow.resolvedEvidence[0].kbKind, "material");
+  assert.equal(matRow.resolvedEvidence[0].kbFiles.length, 1);
+
+  const oemRow = withMatState.view.rows.find((r: any) => r.id === "n-oem-mismatch");
+  assert.equal(oemRow.resolvedMaterialStatus, "needs_review");
+  assert.equal(oemRow.resolvedEvidence[0].status, "invalid");
+  assert.equal(oemRow.resolvedEvidence[0].kbSubject, "mismatch");
 });

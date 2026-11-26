@@ -423,6 +423,11 @@ export const zh = {
   outlineClickToZoom: "点击查看大图",
   outlineNoImagePreview: "暂无图片预览",
   outlineKbSourceTag: "知识库",
+  outlineKbMaterialTag: "知识库素材",
+  outlineKbExpired: "已过期",
+  outlineKbForbidden: "禁用主体",
+  outlineKbMismatch: "持证方非本企业",
+  outlineKbMismatchHint: "该证持证方与本企业主体名称不一致（如外购部件厂家证书，可在知识库主体档案中将其加入允许的第三方持证方）",
   outlineLocalSourceTag: "本项目",
 };
 export const en: Record<keyof typeof zh, string> = {
@@ -852,5 +857,10 @@ export const en: Record<keyof typeof zh, string> = {
   outlineClickToZoom: "Click to zoom",
   outlineNoImagePreview: "No image preview",
   outlineKbSourceTag: "Vault",
+  outlineKbMaterialTag: "Vault material",
+  outlineKbExpired: "Expired",
+  outlineKbForbidden: "Forbidden holder",
+  outlineKbMismatch: "Third-party holder",
+  outlineKbMismatchHint: "Holder differs from your company legal name (e.g. OEM component vendor cert; add to allowed third-party holders in vault if applicable)",
   outlineLocalSourceTag: "Project",
 };

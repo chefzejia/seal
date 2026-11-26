@@ -19,6 +19,7 @@ export type OutlineMaterialStatus =
 
 export interface OutlineKbRecordSummary {
   id: string;
+  kbKind?: "record" | "material";
   title?: string;
   type?: string;
   verified: boolean;
@@ -34,6 +35,7 @@ export interface OutlineKbRecordSummary {
 
 export interface ResolvedOutlineEvidence extends OutlineEvidenceBinding {
   status: "ready" | "unverified" | "missing" | "invalid";
+  kbKind?: "record" | "material";
   title?: string;
   type?: string;
   hasFiles?: boolean;
@@ -282,6 +284,7 @@ export function buildOutlineView(input: {
             return { ...binding, status: "missing" };
           }
           const kbMeta = {
+            kbKind: rec.kbKind ?? ("record" as const),
             title: rec.title,
             type: rec.type,
             hasFiles: rec.hasFiles,
@@ -294,6 +297,13 @@ export function buildOutlineView(input: {
             kbValidity: rec.validity,
             kbSubject: rec.subject,
           };
+          if (rec.kbKind === "material") {
+            return {
+              ...binding,
+              status: "ready",
+              ...kbMeta,
+            };
+          }
           if (
             rec.validity === "expired" ||
             rec.subject === "forbidden" ||
@@ -339,13 +349,13 @@ export function buildOutlineView(input: {
     let resolvedMaterialStatus: OutlineMaterialStatus = "not_applicable";
     if (node.materialMissing) {
       resolvedMaterialStatus = "missing";
+    } else if (resolvedEvidence.some((item) => item.status === "missing")) {
+      resolvedMaterialStatus = "missing";
     } else if (
       resolvedEvidence.some(
-        (item) => item.status === "missing" || item.status === "invalid",
+        (item) => item.status === "unverified" || item.status === "invalid",
       )
     ) {
-      resolvedMaterialStatus = "missing";
-    } else if (resolvedEvidence.some((item) => item.status === "unverified")) {
       resolvedMaterialStatus = "needs_review";
     } else if (resolvedEvidence.length > 0) {
       resolvedMaterialStatus = "ready";

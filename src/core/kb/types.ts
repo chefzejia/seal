@@ -44,6 +44,7 @@ export interface HealthReport {
   vaultId: string;
   referenceDate: string;
   records: Array<KbEntry & { validity: 'valid' | 'expiring_soon' | 'expired' | 'unknown' | 'not_applicable'; subject: 'self' | 'third_party' | 'forbidden' | 'mismatch' | 'unknown' }>;
+  materials?: KbEntry[];
   issues: HealthIssue[];
 }
 

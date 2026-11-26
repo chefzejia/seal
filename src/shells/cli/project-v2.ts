@@ -524,12 +524,14 @@ async function loadFactContext(
   quoteErrors: Map<string, string>;
   kbRecords: OutlineKbRecordSummary[];
   kbRecordHasFiles: Map<string, boolean>;
+  kbMaterials: Map<string, KbEntry>;
 }> {
   const records = new Map<string, FactRecord>(),
     quotes = new Map<string, string>(),
     quoteErrors = new Map<string, string>(),
     kbRecords: OutlineKbRecordSummary[] = [],
-    kbRecordHasFiles = new Map<string, boolean>();
+    kbRecordHasFiles = new Map<string, boolean>(),
+    kbMaterials = new Map<string, KbEntry>();
   let subject: KbEntry | undefined,
     identity:
       | {
@@ -569,6 +571,7 @@ async function loadFactContext(
             : record.fields.holder;
         kbRecords.push({
           id: record.id,
+          kbKind: "record",
           ...(typeof record.fields.title === "string"
             ? { title: record.fields.title }
             : {}),
@@ -591,6 +594,25 @@ async function loadFactContext(
             ? { number: record.fields.number }
             : {}),
           revision: sha256Hex(JSON.stringify(entryForRevision)),
+        });
+      }
+      for (const material of health.materials ?? []) {
+        kbMaterials.set(material.id, material);
+        const files = asStringList(material.fields.files);
+        const hasFiles = files.length > 0;
+        kbRecordHasFiles.set(material.id, hasFiles);
+        kbRecords.push({
+          id: material.id,
+          kbKind: "material",
+          ...(typeof material.fields.title === "string"
+            ? { title: material.fields.title }
+            : {}),
+          ...(typeof material.fields.type === "string"
+            ? { type: material.fields.type }
+            : {}),
+          verified: true,
+          hasFiles,
+          ...(files.length > 0 ? { files } : {}),
         });
       }
       const citedIds = new Set(
@@ -648,6 +670,7 @@ async function loadFactContext(
     quoteErrors,
     kbRecords,
     kbRecordHasFiles,
+    kbMaterials,
   };
 }
 
@@ -1091,6 +1114,7 @@ async function resolveOutlineKbMediaStates(
   vaultId: string | null,
   outline: OutlineDocument,
   records: ReadonlyMap<string, FactRecord>,
+  materials?: ReadonlyMap<string, KbEntry>,
 ): Promise<Map<string, OutlineKbMediaState>> {
   const result = new Map<string, OutlineKbMediaState>();
   const boundIds = new Set<string>();
@@ -1123,7 +1147,7 @@ async function resolveOutlineKbMediaStates(
   }
 
   for (const recordId of boundIds) {
-    const record = records.get(recordId);
+    const record = records.get(recordId) ?? materials?.get(recordId);
     if (!record) {
       result.set(recordId, {
         kind: "error",
@@ -1256,6 +1280,7 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
           project.vaultId,
           outline.outline,
           loaded.context.records,
+          loaded.kbMaterials,
         )
       : new Map<string, OutlineKbMediaState>();
   const outlineResults = await checkOutlineConsistency({

@@ -6716,9 +6716,21 @@ currentWindow.__ModuleLoader__.load({
                         "div",
                         { className: "seal-stack-sm seal-divider" },
                         h("h3", null, t("outlineEvidenceSection")),
+                        selectedRow.materialNote &&
+                          h(
+                            "div",
+                            { className: "seal-callout seal-callout-warn" },
+                            h(
+                              "span",
+                              { className: "seal-small", style: { color: "var(--dsw-alias-label-primary)" } },
+                              selectedRow.materialNote,
+                            ),
+                          ),
                         ...selectedRow.resolvedEvidence.map((ev) => {
                           const evTitle = ev.title ?? ev.label ?? ev.ref;
                           const vaultId = payload.project.vaultId;
+                          const kbEntryKind =
+                            ev.kbKind === "material" ? "material" : "record";
                           const kbImageEntries =
                             ev.source === "kb" && vaultId && ev.kbFiles
                               ? ev.kbFiles
@@ -6733,7 +6745,7 @@ currentWindow.__ModuleLoader__.load({
                             ({ index }) =>
                               `/api/seal/kb-file?${new URLSearchParams({
                                 vaultId: vaultId!,
-                                kind: "record",
+                                kind: kbEntryKind,
                                 id: ev.ref,
                                 index: String(index),
                               })}`,
@@ -6768,8 +6780,17 @@ currentWindow.__ModuleLoader__.load({
                           ].filter(Boolean);
                           const needsHumanVerify =
                             ev.source === "kb" &&
+                            ev.kbKind !== "material" &&
                             ev.kbVerified === false &&
                             Boolean(ev.kbRevision);
+                          const kbInvalidLabel =
+                            ev.kbValidity === "expired"
+                              ? `${t("outlineKbExpired")}${ev.kbValidUntil ? ` (${ev.kbValidUntil})` : ""}`
+                              : ev.kbSubject === "forbidden"
+                                ? t("outlineKbForbidden")
+                                : ev.kbSubject === "mismatch"
+                                  ? t("outlineKbMismatch")
+                                  : t("outlineMatMissing");
                           const isPromotingThis =
                             ev.source === "material" &&
                             promotingRef === ev.ref;
@@ -6818,7 +6839,9 @@ currentWindow.__ModuleLoader__.load({
                                 "span",
                                 { className: "seal-badge" },
                                 ev.source === "kb"
-                                  ? t("outlineKbSourceTag")
+                                  ? ev.kbKind === "material"
+                                    ? t("outlineKbMaterialTag")
+                                    : t("outlineKbSourceTag")
                                   : t("outlineLocalSourceTag"),
                               ),
                               h(
@@ -6827,13 +6850,17 @@ currentWindow.__ModuleLoader__.load({
                                   className: `seal-badge ${ev.status === "ready" ? "seal-badge-ok" : ev.status === "unverified" ? "seal-badge-info" : "seal-badge-error"}`,
                                 },
                                 ev.source === "kb"
-                                  ? ev.status === "ready"
-                                    ? t("verified")
-                                    : ev.kbVerified
-                                      ? t("outlineKbMissingMetaHint")
-                                      : ev.status === "unverified"
-                                        ? t("unverified")
-                                        : t("outlineMatMissing")
+                                  ? ev.kbKind === "material"
+                                    ? t("outlineMatReady")
+                                    : ev.status === "ready"
+                                      ? t("verified")
+                                      : ev.status === "invalid"
+                                        ? kbInvalidLabel
+                                        : ev.kbVerified
+                                          ? t("outlineKbMissingMetaHint")
+                                          : ev.status === "unverified"
+                                            ? t("unverified")
+                                            : t("outlineMatMissing")
                                   : ev.status === "ready"
                                     ? t("outlineMatReady")
                                     : t("outlineMatMissing"),
@@ -6896,6 +6923,14 @@ currentWindow.__ModuleLoader__.load({
                                   { className: "seal-small" },
                                   t("outlineNoImagePreview"),
                                 ),
+                            ev.source === "kb" &&
+                              ev.status === "invalid" &&
+                              ev.kbSubject === "mismatch" &&
+                              h(
+                                "span",
+                                { className: "seal-small" },
+                                t("outlineKbMismatchHint"),
+                              ),
                             needsHumanVerify &&
                               h(
                                 "div",
@@ -7044,7 +7079,9 @@ currentWindow.__ModuleLoader__.load({
                                 h(
                                   "option",
                                   { key: rec.id, value: rec.id },
-                                  `${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""} · ${t(rec.verified ? "verified" : "unverified")}`,
+                                  rec.kbKind === "material"
+                                    ? `[${t("outlineKbMaterialTag")}] ${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""}`
+                                    : `${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""} · ${t(rec.verified ? "verified" : "unverified")}`,
                                 ),
                               ),
                             ),
