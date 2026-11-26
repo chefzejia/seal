@@ -7,7 +7,7 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
 2. 本轮解耦：#25 改为 `superseded (by #31)`，#26 改为 `superseded (by #32)`；#27 的前置 #26 按 [ROLES.md](ROLES.md) 自动改看 #32（及合并真机验收 #33）。
 3. 协作拓扑升级（2026-11-22）：日常实现与独立终端验证由 Antigravity Brain + 原生 Swarm 闭环；`.git/hooks/post-commit` 改为仅在新增 `Executor: gpt-cua` 且 `Status: pending` 的大节点集中真机验收里程碑时唤醒 GPT Router（只读源码、不改业务代码）。#31 与 #32 的全量代码、独立 Swarm Tester 终端验证与异源 `gpt-auditor` 审计已在 `1f6f079` 闭环并统一冻结为 `dist/seal-dsh-0.1.329.tgz`，现派发 `#33`（`Executor: gpt-cua`）执行一次合批真实 DSH Desktop Final CUA 验收。
 
-**执行顺序：#29–#41、#27 全部 `verified`；已全部收口，待用户完成 `npm login`、仓库改 Public 与公网发布。**
+**执行顺序：#29–#41、#27 全部 `verified`（且已于 `b39810c` 完成公开仓脱敏与公网 npm `seal-dsh@0.1.604` 交付）；当前派发 `#42`（两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算）。**
 
 ## Router 冷启动与执行边界
 
@@ -41,12 +41,12 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
 - **资料与权限**：用户本地招标文件、企业母本与知识库原件永久只读。测试的 `SEAL_HOME` 指向 `.tmp/` 下的临时目录，不读写真实的 `~/.seal`。界面与安装验收使用真实 DSH Desktop Profile，可以安装本项目新包并按需重启 DSH，保留用户已有的配置、会话与其他插件，不授予兼容性豁免。
 - **公开语料**：#22 下载的公开招标文件只存放在 `.tmp/corpus/`，不进仓库，样本信息不进 `src/**` 与 `scripts/**`。
 
-## 当前状态（2026-11-25 17:30）
+## 当前状态（2026-11-26 16:46）
 
 | 观察面 | 事实 |
 | :--- | :--- |
-| 已完成 | #22、#28、#29、#30、#31、#32、#33、#27、#34、#35、#36、#37、#38、#39、#40、**#41（`d868b10`，`dist/seal-dsh-0.1.597.tgz`，500/500 + 16/16 + `m41-tester` 2 轮 `PASS` + `gpt-auditor` 终审 `NO_ISSUES` + `market/index.json` 经本机 DSH `parseMarketIndex` 真校验通过）** 全部 `verified`。 |
-| 下一步 | 全部已派发里程碑已收口；用户完成 `npm login`、隐私核查与改仓库为 Public 后，即可按 [RELEASE.md](RELEASE.md) 一键发布公网 npm 并启用免费 DSH 市场发现。 |
+| 已完成 | #22、#28、#29、#30、#31、#32、#33、#27、#34、#35、#36、#37、#38、#39、#40、#41 全部 `verified`；`b39810c` 已公开脱敏仓库并发布公网 `seal-dsh@0.1.604`（npm + DSH 市场索引 + GitHub Release）。 |
+| 进行中 | **#42（两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算）**，已冻结契约，分 2 个实现切片 + 独立验收/实屏验收/异源审计推进。 |
 | 审计水位 | `d868b10e1d0cdb143ca1f495819dedbc39f9f117`（见 [LESSONS.md](LESSONS.md) 首行 `reviewed-through`）。 |
 
 真实只读输入（只在测试输入与本调度板出现）：
@@ -454,6 +454,27 @@ Brain 派单日期：2026-11-22。契约基线：`3c88d90`（Antigravity Brain +
   - `npm run verify` 全绿 + `tests/dsh-bundle.test.ts` 全绿（并在 `dsh-bundle.test.ts` 实测解包后的真实 DSH 运行时成功加载 `@hyzyla/pdfium` 完成 PDF 解析！）。
 - **Tester 与实屏验收要求**：独立 Swarm Tester（`m41-tester`）全量验算、解包实测零 Poppler 下的 PDFium WASM 与 `market/index.json` 真校验 `PASS`；异源 `gpt-auditor`（`effort=high`）终审 `P0=0, P1=0`；物理隔离 `dsh --profile web` 经 `browser` 子代理实屏核验「缺 LibreOffice 时横幅展示与收起 + 有 LibreOffice 时静默不显示」；安装最新 TGZ 到桌面 Profile 并确认 `npm run dsh:doctor` 干净。
 
+## [Milestone #42] 两阶段编制蓝图：大纲先审、当场补料与 C17 漏章漏证验算
+
+- **Status**: pending
+- **Depends-On**: #41
+- **Scope**: `src/core/bid/**`, `src/workbench/**`, `src/shells/cli/**`, `src/shells/dsh/**`, `tests/**`
+- **用户可观测目标**：支持默认“先生成大纲 → 人工审改与当场补齐缺失材料并确认 → 再精准生成标书”的两阶段流程（同时保留“跳过大纲直接生成”快捷选项）；业务人员可在会话右栏快速确认或一键进入全宽大纲编辑器对章节做增删改查、层级调整、模板锁保护、评分项映射、当场上传/绑定证照材料与撤回重做；确认大纲后 Seal 以 C17 确定性核验草稿未漏章、未漏挂已绑定材料。
+- **行为契约**：
+  1. **纯逻辑大纲内核与 C17 确定性验算（`src/core/bid/outline.ts`、`authorization.ts`、`project.ts`、`human-review.ts`、`report.ts`、`check.ts`，零 `node:*` 依赖）**：
+     - 严格遵循 [3-bid-workflow-and-checks.md](subsystems/3-bid-workflow-and-checks.md) 第五、六、八节：`seal-outline-1` schema 与严格校验（唯一 ID、无环树、层级 `1–6`、拒绝任何确认/授权字段、路径隔离校验）、规范摘要 `canonicalOutlineDigest`、树编辑纯函数（新增、编辑、删子树并保护非可选 `lockedTemplate`、上下移动子树、升/降级、开关启用、绑定/解绑证据）；
+     - 人工确认 `confirmOutline` 使用 `kind: 'outline_confirm'` HMAC 签名存入 `ledger.outlineConfirmation` 并受项目外锚点保护；大纲摘要/知识库/截标日变化后自动失效为 `stale`，伪造签名报 C15；
+     - `CHECK_CODES` 纳入 `C17`（无 `outline.json` 时计为 0，100% 向后兼容；`outline.json` 损坏阻断；`outline_first` 模式未确认或 `stale` 未重确认阻断；启用分册未建、启用章节标题未落盘、已绑定 KB 证据未出现在活跃 `ledger.fills`+文档书签、或已绑定上传材料/PDF 渲染页字节 SHA256 未出现在草稿活跃嵌入 `word/media/*` 均阻断）。
+  2. **Agent 工具、CLI、两阶段 Skill 与纯视图模型（`src/shells/dsh/project-tools.ts`、`seal-bid-skill.ts`、`src/shells/cli/**`、`src/workbench/outline.ts`、`requirements.ts`、`review.ts`）**：
+     - 新增 `seal_outline`（`get` / `save` / `patch`）与 CLI `seal outline`（绝不提供 `confirm`）；CLI `project init` 支持 `--workflow-mode <outline_first|direct>`；
+     - 升级 `seal-bid` 操作手册与 `buildBidStartupPrompt` / `buildOutlineExecutionPrompt` / `buildOutlineRevisionPrompt` 支持两阶段闭环；
+     - `src/workbench/outline.ts` 实现树投影、统计（总节数、待补材料、待核实材料、未覆盖必答要求、C17 缺口、相对基线调整数 `countOutlineChanges`）与保留祖先上下文的搜索/筛选纯函数；`src/workbench/review.ts` 接入 C17 分组。
+  3. **Owner 宿主服务与双视图工作台界面（`src/shells/dsh/workbench-host.ts`、`client.ts`、`client-locale.ts`、`client-style.ts`）**：
+     - 仅经 owner `/api/seal/action` 暴露 `outline_get`、`outline_save`（409 版本冲突守卫）、`outline_upload_material`（原件只读复制至 `materials/outline/`，PDF 自动走内置 PDFium 渲染 PNG 页并自动绑定清除 `materialMissing`）、`outline_confirm`（签章落盘并返回阶段二执行指令），并在 `/api/seal/file` 支持安全预览已上传 `materials/` 文件；`overview()` 与 `review()` 附带实时 `outlineSummary`；
+     - UI 完整落地 [4-dsh-plugin-and-workbench.md](subsystems/4-dsh-plugin-and-workbench.md) 第四节：开启投标默认两阶段模式切换、进行中的投标显示大纲状态与「编辑大纲」入口、会话右栏新增「大纲」标签页（快览、待补提醒、一键「全宽编辑大纲」与内联确认触发阶段二）及 C17 审阅卡片、左侧全局页承载完整全宽双栏/三区大纲编辑器（左树搜索与底部统计、中栏树形增删改查/移动/升降级/撤回重做/模板锁保护/筛选、右抽屉写作批注+评分项勾选+KB 证照选择+本地材料上传预览+「让 AI 调整本节」），兼容浅/深双主题与 360px 窄栏。
+- **Worker 工程门禁**：共用门槛；新增 `tests/milestone42-outline-blueprint.test.ts` 覆盖内核校验、树变换、HMAC 确认与失效/篡改（C15）、C17 漏分册/漏章/漏 KB 证据/漏上传图与 PDF 渲染页/删除后复现漏证、授权隔离（工具与 CLI 不可确认）、`outline_upload_material` PDFium 自动渲染与原件只读、视图模型筛选/统计/调整计数、至少 2 项 `Broken by hand` 破坏验证；`npm run verify` 与 `tests/dsh-bundle.test.ts` 全绿。
+- **Tester 与实屏验收要求**：独立 Swarm Tester（`m42-tester`）全量验算、解包实测与对抗探针 `PASS`；异源 `gpt-auditor`（`effort=high`）终审 `P0=0, P1=0`；物理隔离 `dsh --profile web` 经 `browser` 子代理实屏核验「新建两阶段项目 → 右栏大纲快览 → 全宽大纲编辑器增删改查/移动/升降级/撤回重做/搜索筛选 → 绑定 KB 与上传本地图片/PDF 清除待补材料 → 内联确认锁定并触发阶段二消息 → C17 展示」，覆盖浅/深双主题与 360px 窄栏并截屏留证。
+
 ## 本轮完成的判据
 
-#29、#30、#31、#32、#33、#27、#34、#35、#36、#37、#38、#39、#40、#41 全部 `verified`；默认门禁、构建与真实环境闭环通过。不以测试数量、检查报告为零、安装成功或 HTTP 200 单独宣告可用于真实投标。
+#29–#42、#27 全部 `verified`；默认门禁、构建与真实环境闭环通过。不以测试数量、检查报告为零、安装成功或 HTTP 200 单独宣告可用于真实投标。
