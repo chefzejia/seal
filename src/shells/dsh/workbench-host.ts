@@ -375,6 +375,31 @@ export class WorkbenchHost {
       return `${label}[${tags.join(",")}]`;
     };
     const anchorPath = await this.host.ledgerAnchorPath?.(root, false);
+    let linkedVaultId: string | null = null;
+    try {
+      const rawProject = JSON.parse(
+        await fs.readFile(path.join(root, "seal-project.json"), "utf8"),
+      ) as { vaultId?: unknown };
+      if (typeof rawProject?.vaultId === "string" && rawProject.vaultId.trim()) {
+        linkedVaultId = rawProject.vaultId.trim();
+      }
+    } catch {
+      /* Ignore unreadable project metadata; project statTag captures changes. */
+    }
+    let kbTags: Promise<string>[] = [];
+    if (linkedVaultId && /^[\p{L}\p{N}-]+$/u.test(linkedVaultId)) {
+      try {
+        const kbRoot = knowledgeBasesRoot();
+        const vaultDir = path.join(kbRoot, linkedVaultId);
+        kbTags = [
+          statTag("kb-meta", path.join(vaultDir, "vault.json")),
+          statTag("kb-subject", path.join(vaultDir, "subject.md")),
+          statTag("kb-log", path.join(vaultDir, "log.jsonl")),
+        ];
+      } catch {
+        kbTags = [Promise.resolve("kb:err")];
+      }
+    }
     const parts = await Promise.all([
       statTag("project", path.join(root, "seal-project.json")),
       statTag("ledger", path.join(root, "ledger.json")),
@@ -386,6 +411,7 @@ export class WorkbenchHost {
       dirTag("draft", path.join(root, "draft")),
       dirTag("materials", path.join(root, "materials")),
       dirTag("final", path.join(root, "final")),
+      ...kbTags,
     ]);
     return sha256Hex(encoder.encode(parts.join("|")));
   }
@@ -1417,6 +1443,8 @@ export class WorkbenchHost {
           ...(renderedPages ? { renderedPages } : {}),
         };
         let syncedKbId: string | undefined;
+        let syncedKbRoot: string | undefined;
+        let syncedVaultId: string | undefined;
 
         if (saveToKb) {
           const vaultId = snapshot.project.vaultId;
@@ -1434,9 +1462,9 @@ export class WorkbenchHost {
               ? input.kbType.trim()
               : "其他";
           const kbValidUntil =
-            typeof input.kbValidUntil === "string" && input.kbValidUntil.trim()
+            typeof input.kbValidUntil === "string"
               ? input.kbValidUntil.trim()
-              : "不适用";
+              : "";
           const kbHolderInput =
             typeof input.kbHolder === "string" && input.kbHolder.trim()
               ? input.kbHolder.trim()
@@ -1459,7 +1487,7 @@ export class WorkbenchHost {
               const fields: Record<string, string> = {
                 type: kbType,
                 title: kbTitle,
-                validUntil: kbValidUntil,
+                ...(kbValidUntil ? { validUntil: kbValidUntil } : {}),
                 ...(holder ? { holder } : {}),
               };
               const created = await kb.save(vaultId, {
@@ -1505,15 +1533,13 @@ export class WorkbenchHost {
             },
           );
           syncedKbId = createdRecord.id;
+          syncedKbRoot = kbRoot;
+          syncedVaultId = vaultId;
           binding = {
             source: "kb",
             ref: createdRecord.id,
             label: kbTitle,
           };
-          await fs.rm(copiedPath, { force: true }).catch(() => {});
-          await fs
-            .rm(pagesDir, { recursive: true, force: true })
-            .catch(() => {});
         }
 
         if (nodeId && snapshot.outline.kind === "value") {
@@ -1526,12 +1552,32 @@ export class WorkbenchHost {
               updatedBy: "human",
             },
           );
-          await writeOutlineFile(
-            this.host,
-            root,
-            snapshot.project,
-            nextOutline,
-          );
+          try {
+            await writeOutlineFile(
+              this.host,
+              root,
+              snapshot.project,
+              nextOutline,
+            );
+          } catch (outlineError) {
+            if (syncedKbId && syncedKbRoot && syncedVaultId) {
+              await serializedKnowledgeBase(syncedKbRoot, async () => {
+                await new KnowledgeBase(this.host, syncedKbRoot!).deleteEntry(
+                  syncedVaultId!,
+                  "record",
+                  syncedKbId!,
+                  "human",
+                );
+              }).catch(() => {});
+            }
+            throw outlineError;
+          }
+        }
+        if (saveToKb) {
+          await fs.rm(copiedPath, { force: true }).catch(() => {});
+          await fs
+            .rm(pagesDir, { recursive: true, force: true })
+            .catch(() => {});
         }
 
         const refreshed = await this.readOutlineGetUnlocked(root, id);
@@ -1637,9 +1683,7 @@ export class WorkbenchHost {
           ? input.kbType.trim()
           : "其他";
       const kbValidUntil =
-        typeof input.kbValidUntil === "string" && input.kbValidUntil.trim()
-          ? input.kbValidUntil.trim()
-          : "不适用";
+        typeof input.kbValidUntil === "string" ? input.kbValidUntil.trim() : "";
       const kbHolderInput =
         typeof input.kbHolder === "string" && input.kbHolder.trim()
           ? input.kbHolder.trim()
@@ -1677,7 +1721,7 @@ export class WorkbenchHost {
           fields: {
             type: kbType,
             title: kbTitle,
-            validUntil: kbValidUntil,
+            ...(kbValidUntil ? { validUntil: kbValidUntil } : {}),
             ...(holder ? { holder } : {}),
           },
           body: kbTextBody,
@@ -1728,12 +1772,24 @@ export class WorkbenchHost {
           evidence: [...remaining, kbBinding],
         };
       });
-      await writeOutlineFile(this.host, root, snapshot.project, {
-        ...snapshot.outline.outline,
-        nodes: nextNodes,
-        updatedAt: new Date().toISOString(),
-        updatedBy: "human",
-      });
+      try {
+        await writeOutlineFile(this.host, root, snapshot.project, {
+          ...snapshot.outline.outline,
+          nodes: nextNodes,
+          updatedAt: new Date().toISOString(),
+          updatedBy: "human",
+        });
+      } catch (outlineError) {
+        await serializedKnowledgeBase(kbRoot, async () => {
+          await new KnowledgeBase(this.host, kbRoot).deleteEntry(
+            vaultId,
+            "record",
+            createdRecord.id,
+            "human",
+          );
+        }).catch(() => {});
+        throw outlineError;
+      }
       const refreshed = await this.readOutlineGetUnlocked(root, id);
       return { ...refreshed, syncedKbId: createdRecord.id };
     });

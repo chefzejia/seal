@@ -55,6 +55,7 @@ import {
   filterOutlineRows,
   outlineFilterCounts,
   reconcileOutlineSaveResult,
+  reconcileOutlineServerPayload,
   runOutlineConfirmFlow,
   unbindEvidenceFromNode,
   type OutlineKbRecordSummary,
@@ -2445,9 +2446,13 @@ currentWindow.__ModuleLoader__.load({
                           : t("outlineTab"),
                       ),
                   ),
-                h(
-                  "div",
-                  { className: "seal-banner" },
+                !(
+                  review.project.workflowMode !== "direct" &&
+                  review.project.drafts.length === 0
+                ) &&
+                  h(
+                    "div",
+                    { className: "seal-banner" },
                   h(
                     "div",
                     { className: "seal-row seal-between" },
@@ -5290,7 +5295,29 @@ currentWindow.__ModuleLoader__.load({
             value: string;
           } | null>(null);
           const loadedRevisionRef = React.useRef("");
+          const loadedProjectIdRef = React.useRef("");
+          const forceSyncRef = React.useRef(false);
           const localEditSeqRef = React.useRef(0);
+          const syncedEditSeqRef = React.useRef(0);
+          const editorStateRef = React.useRef<{
+            serverRevision: string;
+            baselineOutline: OutlineDocument | null;
+            draftOutline: OutlineDocument | null;
+            undoStack: OutlineDocument[];
+            redoStack: OutlineDocument[];
+            conflictError: string;
+            confirmMissing: boolean;
+            isDirty: boolean;
+          }>({
+            serverRevision: "",
+            baselineOutline: null,
+            draftOutline: null,
+            undoStack: [],
+            redoStack: [],
+            conflictError: "",
+            confirmMissing: false,
+            isDirty: false,
+          });
 
           const payload =
             resource.state.kind === "value" &&
@@ -5304,6 +5331,9 @@ currentWindow.__ModuleLoader__.load({
           >) => {
             setServerRevision(nextPayload.revision);
             loadedRevisionRef.current = nextPayload.revision;
+            loadedProjectIdRef.current = nextPayload.projectId;
+            syncedEditSeqRef.current = localEditSeqRef.current;
+            forceSyncRef.current = false;
             setKbRecordsOverride(nextPayload.kbRecords);
             if (nextPayload.outline.kind === "value") {
               setBaselineOutline(nextPayload.outline.outline);
@@ -5326,10 +5356,55 @@ currentWindow.__ModuleLoader__.load({
             setConfirmMissing(false);
           };
 
+          const isDirty = Boolean(
+            draftOutline &&
+              (!baselineOutline ||
+                canonicalOutlineDigest(baselineOutline) !==
+                  canonicalOutlineDigest(draftOutline)),
+          );
+          editorStateRef.current = {
+            serverRevision,
+            baselineOutline,
+            draftOutline,
+            undoStack,
+            redoStack,
+            conflictError,
+            confirmMissing,
+            isDirty,
+          };
+
           React.useEffect(() => {
             if (!payload) return;
-            if (loadedRevisionRef.current === payload.revision) return;
-            syncFromPayload(payload);
+            const sameProject =
+              loadedProjectIdRef.current === payload.projectId;
+            if (sameProject && loadedRevisionRef.current === payload.revision)
+              return;
+            if (
+              !sameProject ||
+              !loadedRevisionRef.current ||
+              forceSyncRef.current
+            ) {
+              syncFromPayload(payload);
+              return;
+            }
+            setKbRecordsOverride(payload.kbRecords);
+            const reconciled = reconcileOutlineServerPayload({
+              current: editorStateRef.current,
+              incoming: payload,
+              sentSeq: syncedEditSeqRef.current,
+              currentSeq: localEditSeqRef.current,
+              isDirtyNow: editorStateRef.current.isDirty,
+              serverMutatedOutline: false,
+              conflictMessage: t("outlineConflictBanner"),
+            });
+            loadedRevisionRef.current = payload.revision;
+            if (reconciled.action === "sync_all") {
+              syncFromPayload(payload);
+            } else if (reconciled.action === "keep_draft_advance_rev") {
+              setServerRevision(reconciled.state.serverRevision);
+            } else {
+              setConflictError(reconciled.state.conflictError);
+            }
           }, [payload]);
 
           React.useEffect(() => {
@@ -5367,12 +5442,6 @@ currentWindow.__ModuleLoader__.load({
             }
           }, [props.focusNodeId, draftOutline?.nodes.length]);
 
-          const isDirty = Boolean(
-            draftOutline &&
-              (!baselineOutline ||
-                canonicalOutlineDigest(baselineOutline) !==
-                  canonicalOutlineDigest(draftOutline)),
-          );
           useProjectAutoRefresh({
             enabled: !isDirty && Boolean(props.projectId),
             projectId: props.projectId,
@@ -5512,6 +5581,7 @@ currentWindow.__ModuleLoader__.load({
                     type: "button",
                     className: "seal-btn-sm",
                     onClick: () => {
+                      forceSyncRef.current = true;
                       loadedRevisionRef.current = "";
                       setReloadTick((v) => v + 1);
                     },
@@ -5681,6 +5751,7 @@ currentWindow.__ModuleLoader__.load({
                   sendPrompt: (sid, prompt) => send(sid, prompt),
                   openReview: (sid) => openReview(sid),
                   onReloadUnbound: () => {
+                    forceSyncRef.current = true;
                     loadedRevisionRef.current = "";
                     setReloadTick((v) => v + 1);
                   },
@@ -5774,6 +5845,7 @@ currentWindow.__ModuleLoader__.load({
             expectedKbRevision: string,
           ) =>
             action.run(async () => {
+              const sentSeq = localEditSeqRef.current;
               const res = await api<
                 Extract<OutlineGetResponse, { projectKind: "project" }>
               >("outline_verify_kb", {
@@ -5781,15 +5853,23 @@ currentWindow.__ModuleLoader__.load({
                 kbId,
                 expectedKbRevision,
               });
-              if (!isDirty) {
+              setKbRecordsOverride(res.kbRecords);
+              const reconciled = reconcileOutlineServerPayload({
+                current: editorStateRef.current,
+                incoming: res,
+                sentSeq,
+                currentSeq: localEditSeqRef.current,
+                isDirtyNow: editorStateRef.current.isDirty,
+                serverMutatedOutline: false,
+                conflictMessage: t("outlineConflictBanner"),
+              });
+              if (reconciled.action === "sync_all") {
                 syncFromPayload(res);
-              } else {
-                setServerRevision(res.revision);
+              } else if (reconciled.action === "keep_draft_advance_rev") {
+                setServerRevision(reconciled.state.serverRevision);
                 loadedRevisionRef.current = res.revision;
-                setKbRecordsOverride(res.kbRecords);
-                if (res.outline.kind === "value") {
-                  setBaselineOutline(res.outline.outline);
-                }
+              } else {
+                setConflictError(reconciled.state.conflictError);
               }
               props.onReloadOverview();
             }, t("outlineKbVerifiedNotice"));
@@ -5798,10 +5878,14 @@ currentWindow.__ModuleLoader__.load({
             action.run(async () => {
               const targetFile = uploadFiles[0]?.path;
               if (!targetFile) throw new Error("请选择要上传的本地材料文件");
+              const sentSeq = localEditSeqRef.current;
               const nodeOnDisk = Boolean(
-                baselineOutline?.nodes.some((node) => node.id === nodeId),
+                editorStateRef.current.baselineOutline?.nodes.some(
+                  (node) => node.id === nodeId,
+                ),
               );
-              const persistDirectly = !isDirty && nodeOnDisk;
+              const persistDirectly =
+                !editorStateRef.current.isDirty && nodeOnDisk;
               const syncKbNow = canSyncToKb && saveToKb;
               try {
                 const res = await api<
@@ -5811,7 +5895,7 @@ currentWindow.__ModuleLoader__.load({
                   } & Extract<OutlineGetResponse, { projectKind: "project" }>
                 >("outline_upload_material", {
                   projectId: props.projectId,
-                  expectedRevision: serverRevision,
+                  expectedRevision: editorStateRef.current.serverRevision,
                   filePath: targetFile,
                   ...(persistDirectly ? { nodeId } : {}),
                   ...(syncKbNow
@@ -5832,21 +5916,32 @@ currentWindow.__ModuleLoader__.load({
                 setKbUploadTitle("");
                 setKbUploadValidUntil("");
                 setKbRecordsOverride(res.kbRecords);
-                if (persistDirectly) {
+                const reconciled = reconcileOutlineServerPayload({
+                  current: editorStateRef.current,
+                  incoming: res,
+                  sentSeq,
+                  currentSeq: localEditSeqRef.current,
+                  isDirtyNow: editorStateRef.current.isDirty,
+                  serverMutatedOutline: persistDirectly,
+                  conflictMessage: t("outlineConflictBanner"),
+                });
+                if (reconciled.action === "sync_all") {
                   syncFromPayload(res);
-                } else {
-                  setServerRevision(res.revision);
+                } else if (reconciled.action === "keep_draft_advance_rev") {
+                  setServerRevision(reconciled.state.serverRevision);
                   loadedRevisionRef.current = res.revision;
-                  if (res.outline.kind === "value") {
-                    setBaselineOutline(res.outline.outline);
+                  if (!persistDirectly) {
+                    const liveDraft = editorStateRef.current.draftOutline;
+                    if (liveDraft) {
+                      commitEdit(
+                        bindEvidenceToNode(liveDraft, nodeId, res.binding, {
+                          updatedBy: "human",
+                        }),
+                      );
+                    }
                   }
-                  const updatedLocal = bindEvidenceToNode(
-                    draftOutline,
-                    nodeId,
-                    res.binding,
-                    { updatedBy: "human" },
-                  );
-                  commitEdit(updatedLocal);
+                } else {
+                  setConflictError(reconciled.state.conflictError);
                 }
                 props.onReloadOverview();
               } catch (error) {
@@ -5863,9 +5958,18 @@ currentWindow.__ModuleLoader__.load({
             fallbackTitle: string,
           ) =>
             action.run(async () => {
-              const effectiveRevision = isDirty
-                ? (await saveDraftOutline()).revision
-                : serverRevision;
+              let effectiveRevision = editorStateRef.current.serverRevision;
+              if (editorStateRef.current.isDirty) {
+                const saveStartSeq = localEditSeqRef.current;
+                const saved = await saveDraftOutline();
+                if (localEditSeqRef.current !== saveStartSeq) {
+                  throw new Error(
+                    "保存期间大纲有新修改，已取消同步入库，请先保存后再重试。",
+                  );
+                }
+                effectiveRevision = saved.revision;
+              }
+              const sentSeq = localEditSeqRef.current;
               try {
                 const res = await api<
                   { syncedKbId?: string } & Extract<
@@ -5886,7 +5990,21 @@ currentWindow.__ModuleLoader__.load({
                 setPromotingRef(null);
                 setPromoteTitle("");
                 setPromoteValidUntil("");
-                syncFromPayload(res);
+                setKbRecordsOverride(res.kbRecords);
+                const reconciled = reconcileOutlineServerPayload({
+                  current: editorStateRef.current,
+                  incoming: res,
+                  sentSeq,
+                  currentSeq: localEditSeqRef.current,
+                  isDirtyNow: false,
+                  serverMutatedOutline: true,
+                  conflictMessage: t("outlineConflictBanner"),
+                });
+                if (reconciled.action === "sync_all") {
+                  syncFromPayload(res);
+                } else {
+                  setConflictError(reconciled.state.conflictError);
+                }
                 props.onReloadOverview();
               } catch (error) {
                 const msg =
@@ -6030,6 +6148,7 @@ currentWindow.__ModuleLoader__.load({
                     type: "button",
                     className: "seal-btn-sm",
                     onClick: () => {
+                      forceSyncRef.current = true;
                       loadedRevisionRef.current = "";
                       setReloadTick((v) => v + 1);
                     },
@@ -6750,10 +6869,29 @@ currentWindow.__ModuleLoader__.load({
                                 index: String(index),
                               })}`,
                           );
+                          const kbOriginalIndex =
+                            ev.source === "kb" && ev.kbFiles && ev.kbFiles.length > 0
+                              ? (() => {
+                                  const nonImage = ev.kbFiles.findIndex(
+                                    (file) =>
+                                      !/\.(png|jpe?g|webp|bmp|tif|tiff|gif|svg)$/i.test(
+                                        file,
+                                      ),
+                                  );
+                                  return nonImage >= 0 ? nonImage : 0;
+                                })()
+                              : -1;
                           const materialHref =
                             ev.source === "material"
                               ? `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: ev.ref })}`
-                              : kbThumbUrls[0] ?? "";
+                              : ev.source === "kb" && vaultId && kbOriginalIndex >= 0
+                                ? `/api/seal/kb-file?${new URLSearchParams({
+                                    vaultId,
+                                    kind: kbEntryKind,
+                                    id: ev.ref,
+                                    index: String(kbOriginalIndex),
+                                  })}`
+                                : "";
                           const materialThumbUrls =
                             ev.source === "material"
                               ? ev.renderedPages && ev.renderedPages.length > 0

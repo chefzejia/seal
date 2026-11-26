@@ -9,6 +9,7 @@ export interface FactContext {
   deadline: string;
   subject?: KbEntry;
   records: ReadonlyMap<string, FactRecord>;
+  materials?: ReadonlyMap<string, KbEntry>;
   quotes?: ReadonlyMap<string, string>;
 }
 
@@ -17,6 +18,7 @@ export interface FactSource {
   resolvedValue: string;
   verified: boolean;
   recordId?: string;
+  materialId?: string;
   validity?: FactRecord['validity'];
   subject?: FactRecord['subject'];
   thirdPartyHolder?: string;

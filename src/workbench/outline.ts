@@ -745,6 +745,80 @@ export function reconcileOutlineSaveResult(
   };
 }
 
+/**
+ * Reconcile an incoming server snapshot (background auto-refresh, KB verification,
+ * upload, or promote-to-KB) against live local editor state without clobbering
+ * unsaved or in-flight local edits, and without advancing serverRevision past a
+ * diverged server outline.
+ */
+export function reconcileOutlineServerPayload(input: {
+  current: OutlineEditorSaveState;
+  incoming: { revision: string; outline: OutlineState };
+  sentSeq: number;
+  currentSeq: number;
+  isDirtyNow: boolean;
+  serverMutatedOutline: boolean;
+  conflictMessage: string;
+}): {
+  action: "sync_all" | "keep_draft_advance_rev" | "keep_draft_conflict";
+  state: OutlineEditorSaveState;
+} {
+  const {
+    current,
+    incoming,
+    sentSeq,
+    currentSeq,
+    isDirtyNow,
+    serverMutatedOutline,
+    conflictMessage,
+  } = input;
+  const hadInFlightEdit = currentSeq !== sentSeq;
+  if (!hadInFlightEdit && !isDirtyNow) {
+    const nextDraft =
+      incoming.outline.kind === "value" ? incoming.outline.outline : null;
+    return {
+      action: "sync_all",
+      state: {
+        serverRevision: incoming.revision,
+        baselineOutline: nextDraft,
+        draftOutline: nextDraft,
+        undoStack: [],
+        redoStack: [],
+        conflictError: "",
+        confirmMissing: false,
+      },
+    };
+  }
+  const prevBaseDigest = current.baselineOutline
+    ? canonicalOutlineDigest(current.baselineOutline)
+    : null;
+  const incomingDigest =
+    incoming.outline.kind === "value"
+      ? canonicalOutlineDigest(incoming.outline.outline)
+      : null;
+  const outlineUnchangedOnServer =
+    !serverMutatedOutline &&
+    prevBaseDigest !== null &&
+    incomingDigest !== null &&
+    prevBaseDigest === incomingDigest;
+  if (outlineUnchangedOnServer) {
+    return {
+      action: "keep_draft_advance_rev",
+      state: {
+        ...current,
+        serverRevision: incoming.revision,
+      },
+    };
+  }
+  return {
+    action: "keep_draft_conflict",
+    state: {
+      ...current,
+      conflictError: conflictMessage,
+    },
+  };
+}
+
 /** Abort confirmation if the user edited the outline after triggering the confirm flow. */
 export function shouldAbortOutlineConfirm(
   confirmStartSeq: number,

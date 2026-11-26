@@ -1765,6 +1765,7 @@ export async function checkOutlineConsistency(input: {
   drafts: ReadonlyMap<string, Uint8Array>;
   ledger: BidLedger;
   kbRecordHasFiles?: ReadonlyMap<string, boolean>;
+  kbMaterialIds?: ReadonlySet<string>;
   kbRecordImageHashes?: ReadonlyMap<string, readonly string[]>;
   kbRecordMediaStates?: ReadonlyMap<string, OutlineKbMediaState>;
   materialStates?: ReadonlyMap<string, OutlineMaterialState>;
@@ -1928,10 +1929,18 @@ export async function checkOutlineConsistency(input: {
             });
             continue;
           }
+          const isKbMaterial = input.kbMaterialIds?.has(binding.ref) === true;
+          if (isKbMaterial && !requireMedia) {
+            // Text-only or prose reference KB materials (kind="material") have no {{record:...}}
+            // structured fact citation syntax; their readability is verified above and their
+            // section presence is enforced by missing_section.
+            continue;
+          }
           const mounted = activeVolumeFills.some((fill) => {
             const hasMatchingSource = (fill.sources ?? []).some(
               (src) =>
-                src.recordId === binding.ref &&
+                (src.recordId === binding.ref ||
+                  src.materialId === binding.ref) &&
                 (!requireMedia || src.media === true),
             );
             if (!hasMatchingSource) return false;

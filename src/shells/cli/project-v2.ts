@@ -663,6 +663,7 @@ async function loadFactContext(
       deadline: project.deadline,
       ...(subject ? { subject } : {}),
       records,
+      materials: kbMaterials,
       quotes,
     },
     ...(identity ? { identity } : {}),
@@ -743,18 +744,20 @@ async function kbImage(
   const match = /^kb:([\p{L}\p{N}-]+)\/(.+)$/u.exec(decoded);
   if (!match) throw new Error("KB 图片引用格式应为 kb:<record-id>/<file>");
   const [, id, relative] = match,
-    record = context.records.get(id);
-  if (!record) throw new Error(`KB 图片证据记录不存在：${id}`);
+    record = context.records.get(id),
+    material = !record ? context.materials?.get(id) : undefined,
+    entry = record ?? material;
+  if (!entry) throw new Error(`KB 图片证据记录或素材不存在：${id}`);
   if (
     !/^files\/(?:[\p{L}\p{N}_.() -]+\/)*[\p{L}\p{N}_.() -]+$/u.test(relative) ||
     relative.split("/").some((part) => part === "." || part === "..")
   )
     throw new Error("KB 图片路径无效");
-  if (!asStringList(record.fields.files).includes(relative))
-    throw new Error(`图片未登记在证据记录中：${id}`);
+  if (!asStringList(entry.fields.files).includes(relative))
+    throw new Error(`图片未登记在知识库记录或素材中：${id}`);
   const extension = path.extname(relative).toLocaleLowerCase("en-US");
   if (
-    ![".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"].includes(
+    ![".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"].includes(
       extension,
     )
   )
@@ -771,11 +774,23 @@ async function kbImage(
   )
     throw new Error("KB 图片路径越出知识库目录");
   const stored = await host.readBytes(full);
-  const source = {
-    ...recordFactSource(record, decoded, thirdPartyHolder, ""),
-    media: true,
-    ...(imageIndex === undefined ? {} : { imageIndex }),
-  };
+  if (material && thirdPartyHolder) {
+    throw new Error(`写作素材无持证主体，不能声明第三方持证方：${id}`);
+  }
+  const source: FactSource = record
+    ? {
+        ...recordFactSource(record, decoded, thirdPartyHolder, ""),
+        media: true,
+        ...(imageIndex === undefined ? {} : { imageIndex }),
+      }
+    : {
+        reference: decoded,
+        resolvedValue: "",
+        verified: true,
+        materialId: material!.id,
+        media: true,
+        ...(imageIndex === undefined ? {} : { imageIndex }),
+      };
   return {
     bytes: host.normalizeImage
       ? await host.normalizeImage(stored, relative)
@@ -1022,6 +1037,11 @@ function verifiedSources(
         if (!record && knowledgeError)
           issues.push("无法读取引用证据记录的当前状态");
       }
+      if (source.materialId) {
+        const material = context.materials?.get(source.materialId);
+        if (!material && knowledgeError)
+          issues.push("无法读取引用知识库素材的当前状态");
+      }
       try {
         if (
           source.reference.startsWith("{{subject.") &&
@@ -1038,14 +1058,29 @@ function verifiedSources(
           }
           const match = /^kb:([\p{L}\p{N}-]+)\/(.+)$/u.exec(decoded);
           const record = match && context.records.get(match[1]);
-          if (!record || !match) throw new Error("KB 图片证据记录不存在");
-          if (!asStringList(record.fields.files).includes(match[2]))
-            throw new Error("KB 图片已从证据记录中移除");
-          current = {
-            ...recordFactSource(record, source.reference, declaredHolder, ""),
-            media: true,
-            imageIndex: source.imageIndex,
-          };
+          const material = !record && match ? context.materials?.get(match[1]) : undefined;
+          if (!match || (!record && !material))
+            throw new Error("KB 图片证据记录或素材不存在");
+          if (record) {
+            if (!asStringList(record.fields.files).includes(match[2]))
+              throw new Error("KB 图片已从证据记录中移除");
+            current = {
+              ...recordFactSource(record, source.reference, declaredHolder, ""),
+              media: true,
+              imageIndex: source.imageIndex,
+            };
+          } else {
+            if (!asStringList(material!.fields.files).includes(match[2]))
+              throw new Error("KB 图片已从写作素材中移除");
+            current = {
+              reference: source.reference,
+              resolvedValue: "",
+              verified: true,
+              materialId: material!.id,
+              media: true,
+              imageIndex: source.imageIndex,
+            };
+          }
         } else {
           const resolved = resolveFactReferences(
             source.reference,
@@ -1290,6 +1325,7 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     drafts: new Map(volumes.map((item) => [item.name, item.draft])),
     ledger,
     kbRecordHasFiles: loaded.kbRecordHasFiles,
+    kbMaterialIds: new Set(loaded.kbMaterials.keys()),
     kbRecordMediaStates,
     materialStates,
   });

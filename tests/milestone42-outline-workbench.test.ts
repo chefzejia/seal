@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import sharp from "sharp";
 import { NodeHostPort } from "../src/shells/node-host.js";
 import {
   OUTLINE_PDF_MAX_PAGES,
@@ -31,6 +32,7 @@ import {
   canOutdentOutlineNode,
   createOutlineNodeId,
   outlineFilterCounts,
+  reconcileOutlineServerPayload,
   unbindEvidenceFromNode,
 } from "../src/workbench/outline.js";
 import { zh, en } from "../src/shells/dsh/client-locale.js";
@@ -1525,4 +1527,381 @@ test("Outline editor KB loop: kbFiles/metadata exposure, outline_verify_kb, uplo
   assert.equal(oemRow.resolvedMaterialStatus, "needs_review");
   assert.equal(oemRow.resolvedEvidence[0].status, "invalid");
   assert.equal(oemRow.resolvedEvidence[0].kbSubject, "mismatch");
+});
+
+test("GPT audit regressions: KB material & WebP Phase-2 edit/C05/C17 E2E, omitted validUntil stays unknown, writeOutlineFile rollback, KB-only projectStamp, and reconcileOutlineServerPayload", async (t) => {
+  const sandbox = await createSandbox(t, "m42-gpt-audit-");
+  const host = new NodeHostPort();
+  const service = new WorkbenchHost(host);
+
+  const kbRoot = path.join(sandbox, "seal-home", "vaults");
+  await fs.mkdir(kbRoot, { recursive: true });
+  const kb = new KnowledgeBase(host, kbRoot);
+  const vault = await kb.createVault({ name: "审计闭环库", vaultId: "v-gpt-audit" });
+  await kb.save(vault.vaultId, {
+    action: "update",
+    kind: "subject",
+    fields: { legalName: "合成测试企业有限公司" },
+  });
+
+  // KB material with attached PNG
+  const kbMat = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "material",
+    fields: { type: "通用素材", title: "通用架构图素材" },
+    body: "说明文字",
+  });
+  const kbMatAttached = await kb.save(vault.vaultId, {
+    action: "attach_file",
+    kind: "material",
+    id: kbMat.id,
+    file: { fileName: "diagram.png", bytes: PNG_1X1_RED },
+  });
+  const kbMatFile = (kbMatAttached.fields.files as string[])[0];
+  const kbProseMat = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "material",
+    fields: { type: "方案素材", title: "通用供货运输方案" },
+    body: "用于自拟章节写作参考的纯文本素材。",
+  });
+
+  const tenderPath = path.join(sandbox, "tender.docx");
+  await fs.writeFile(
+    tenderPath,
+    await buildDocx([p("一、技术架构图"), p("二、WebP资质图"), p("三、缺效期测试")].join("")),
+  );
+  const created = await service.create({
+    name: "审计全链路回归",
+    deadline: "2028-06-01",
+    vaultId: vault.vaultId,
+    files: [tenderPath],
+    workflowMode: "outline_first",
+  });
+
+  // 1. projectStamp detects KB-only mutation without touching any file in projectRoot
+  const stampBeforeKb = (await service.projectStamp({ projectId: created.id })) as { stamp: string };
+  await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "record",
+    fields: { type: "其他", title: "独立知识库变更" },
+    body: "",
+  });
+  const stampAfterKb = (await service.projectStamp({ projectId: created.id })) as { stamp: string };
+  assert.notEqual(stampAfterKb.stamp, stampBeforeKb.stamp);
+
+  // Initialize outline
+  let state = (await service.outlineGet({ projectId: created.id })) as any;
+  state = await service.outlineSave({
+    projectId: created.id,
+    expectedRevision: state.revision,
+    volumes: [{ name: "商务标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:2" }] }],
+    nodes: [
+      {
+        id: "n-mat",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "一、技术架构图",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: kbMat.id, label: "通用架构图素材" }],
+      },
+      {
+        id: "n-webp",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "二、WebP资质图",
+        kind: "attachment",
+        included: true,
+        materialMissing: true,
+      },
+      {
+        id: "n-unknown-exp",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "三、缺效期测试",
+        kind: "attachment",
+        included: true,
+        materialMissing: true,
+      },
+    ],
+  });
+
+  // 2. Upload WebP with saveToKb=true and explicit validUntil='长期'
+  const webpBytes = await sharp({
+    create: { width: 4, height: 4, channels: 4, background: { r: 20, g: 140, b: 220, alpha: 1 } },
+  }).webp().toBuffer();
+  const webpFile = path.join(sandbox, "cert.webp");
+  await fs.writeFile(webpFile, webpBytes);
+  const uploadedWebp = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: state.revision,
+    filePath: webpFile,
+    nodeId: "n-webp",
+    saveToKb: true,
+    kbTitle: "WebP证书",
+    kbType: "其他",
+    kbValidUntil: "长期",
+  })) as any;
+  const webpRec = await kb.get(vault.vaultId, "record", uploadedWebp.syncedKbId);
+  const webpKbFile = (webpRec.fields.files as string[])[0];
+  assert.ok(webpKbFile.endsWith(".webp"));
+
+  // 3. Omitting kbValidUntil MUST leave validUntil undefined (validity='unknown'), NOT '不适用'
+  const pngUnknown = path.join(sandbox, "no-expiry.png");
+  await fs.writeFile(pngUnknown, PNG_1X1_RED);
+  const uploadedUnknown = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: uploadedWebp.revision,
+    filePath: pngUnknown,
+    nodeId: "n-unknown-exp",
+    saveToKb: true,
+    kbTitle: "未填效期上传件",
+    kbType: "其他",
+  })) as any;
+  const unknownRec = await kb.get(vault.vaultId, "record", uploadedUnknown.syncedKbId);
+  assert.equal(unknownRec.fields.validUntil, undefined);
+  const healthUnknown = await kb.health(vault.vaultId, "2028-06-01", { checkImages: "none" });
+  assert.equal(healthUnknown.records.find((r) => r.id === uploadedUnknown.syncedKbId)?.validity, "unknown");
+
+  // Same check for promote_material_to_kb with omitted kbValidUntil
+  const localForPromote = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: uploadedUnknown.revision,
+    filePath: pngUnknown,
+    nodeId: "n-unknown-exp",
+    saveToKb: false,
+  })) as any;
+  const promotedUnknown = (await service.outlinePromoteMaterialToKb({
+    projectId: created.id,
+    expectedRevision: localForPromote.revision,
+    nodeId: "n-unknown-exp",
+    materialRef: localForPromote.binding.ref,
+    kbTitle: "未填效期转存件",
+    kbType: "其他",
+  })) as any;
+  const promotedRec = await kb.get(vault.vaultId, "record", promotedUnknown.syncedKbId);
+  assert.equal(promotedRec.fields.validUntil, undefined);
+
+  // 4. Compensating rollback: if writeOutlineFile fails after KB creation, no orphan KB record remains
+  const kbCountBeforeFail = (await kb.health(vault.vaultId, "2028-06-01", { checkImages: "none" })).records.length;
+  const failingHost = Object.create(host) as NodeHostPort;
+  failingHost.writeFiles = async (files) => {
+    if (files.some((f) => f.path.endsWith("outline.json"))) {
+      throw new Error("模拟 outline.json 写入失败");
+    }
+    return host.writeFiles(files);
+  };
+  const failingService = new WorkbenchHost(failingHost);
+  await assert.rejects(
+    failingService.outlineUploadMaterial({
+      projectId: created.id,
+      expectedRevision: promotedUnknown.revision,
+      filePath: pngUnknown,
+      nodeId: "n-unknown-exp",
+      saveToKb: true,
+      kbTitle: "应被回滚的孤儿记录",
+      kbType: "其他",
+    }),
+    /模拟 outline\.json 写入失败/,
+  );
+  const kbCountAfterFail = (await kb.health(vault.vaultId, "2028-06-01", { checkImages: "none" })).records.length;
+  assert.equal(kbCountAfterFail, kbCountBeforeFail, "Failed outline write must roll back newly created KB record");
+
+  // Rollback also applies to outlinePromoteMaterialToKb when outline.json write fails
+  const localForRollback = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: promotedUnknown.revision,
+    filePath: pngUnknown,
+    nodeId: "n-unknown-exp",
+    saveToKb: false,
+  })) as any;
+  await assert.rejects(
+    failingService.outlinePromoteMaterialToKb({
+      projectId: created.id,
+      expectedRevision: localForRollback.revision,
+      nodeId: "n-unknown-exp",
+      materialRef: localForRollback.binding.ref,
+      kbTitle: "转存失败应回滚",
+      kbType: "其他",
+    }),
+    /模拟 outline\.json 写入失败/,
+  );
+  const kbCountAfterPromoteFail = (await kb.health(vault.vaultId, "2028-06-01", { checkImages: "none" })).records.length;
+  assert.equal(kbCountAfterPromoteFail, kbCountBeforeFail, "Failed promote outline write must roll back newly created KB record");
+
+  // 5. Phase-2 E2E: confirm outline -> extract -> edit inserting BOTH KB material PNG & WebP record + authored prose material -> check (C05=0, C17=0)
+  const cleanState = (await service.outlineSave({
+    projectId: created.id,
+    expectedRevision: localForRollback.revision,
+    volumes: [{ name: "商务标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:2" }] }],
+    nodes: [
+      {
+        id: "n-mat",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "一、技术架构图",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: kbMat.id, label: "通用架构图素材" }],
+      },
+      {
+        id: "n-webp",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "二、WebP资质图",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: uploadedWebp.syncedKbId, label: "WebP证书" }],
+      },
+      {
+        id: "n-prose-mat",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "三、缺效期测试",
+        kind: "authored",
+        included: true,
+        evidence: [{ source: "kb", ref: kbProseMat.id, label: "通用供货运输方案" }],
+      },
+    ],
+  })) as any;
+
+  await service.outlineConfirm({ projectId: created.id, expectedRevision: cleanState.revision });
+  await runProject(host, [
+    "extract",
+    "--project",
+    created.root,
+    "--draft",
+    "商务标",
+    "--tender",
+    "tender/1.docx",
+    "--ranges",
+    JSON.stringify([{ from: "p:0", to: "p:2" }]),
+  ]);
+  await runProject(host, [
+    "edit",
+    "--project",
+    created.root,
+    "--draft",
+    "商务标",
+    "--ops",
+    JSON.stringify([
+      {
+        op: "insert",
+        at: "p:0",
+        position: "after",
+        markdown: `![架构图](kb:${kbMat.id}/${kbMatFile})`,
+      },
+      {
+        op: "insert",
+        at: "p:1",
+        position: "after",
+        markdown: `![WebP证书](kb:${uploadedWebp.syncedKbId}/${webpKbFile})`,
+      },
+    ]),
+  ]);
+  const checkClean = (await runProject(host, [
+    "check",
+    "--project",
+    created.root,
+  ])) as { projectCounts: Record<string, number> };
+  assert.equal(checkClean.projectCounts.C05, 0, "KB material and WebP KB record images must pass C05 cleanly");
+  assert.equal(checkClean.projectCounts.C17, 0, "KB material and WebP KB record images must pass C17 cleanly");
+
+  // Deleting the KB material must trigger C05 fail-closed
+  await kb.deleteEntry(vault.vaultId, "material", kbMat.id, "human");
+  const checkDeletedMat = (await runProject(host, [
+    "check",
+    "--project",
+    created.root,
+  ])) as { projectCounts: Record<string, number> };
+  assert.ok(checkDeletedMat.projectCounts.C05 > 0, "Deleted KB material image must fail closed in C05");
+
+  // 6. Client state reconciliation guards (Slice 2 #1, #2, #3)
+  const docA: OutlineDocument = {
+    format: "seal-outline-1",
+    volumes: [{ name: "商务标" }],
+    nodes: [{ id: "n1", volume: "商务标", parentId: null, level: 1, title: "标题A", kind: "authored", included: true }],
+  };
+  const docB: OutlineDocument = {
+    format: "seal-outline-1",
+    volumes: [{ name: "商务标" }],
+    nodes: [{ id: "n1", volume: "商务标", parentId: null, level: 1, title: "服务端B", kind: "authored", included: true }],
+  };
+  const docC: OutlineDocument = {
+    format: "seal-outline-1",
+    volumes: [{ name: "商务标" }],
+    nodes: [{ id: "n1", volume: "商务标", parentId: null, level: 1, title: "本地C", kind: "authored", included: true }],
+  };
+  const baseState = {
+    serverRevision: "rev-A",
+    baselineOutline: docA,
+    draftOutline: docC,
+    undoStack: [docA],
+    redoStack: [],
+    conflictError: "",
+    confirmMissing: false,
+  };
+
+  // Case 1: Clean + no in-flight edit -> sync_all
+  const rClean = reconcileOutlineServerPayload({
+    current: { ...baseState, draftOutline: docA, undoStack: [] },
+    incoming: { revision: "rev-B", outline: { kind: "value", outline: docB } },
+    sentSeq: 1,
+    currentSeq: 1,
+    isDirtyNow: false,
+    serverMutatedOutline: false,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rClean.action, "sync_all");
+  assert.equal(rClean.state.draftOutline?.nodes[0].title, "服务端B");
+
+  // Case 2: In-flight edit while background refresh returns unchanged outline -> keep draft & advance rev
+  const rInFlightKbOnly = reconcileOutlineServerPayload({
+    current: baseState,
+    incoming: { revision: "rev-A-kb-verified", outline: { kind: "value", outline: docA } },
+    sentSeq: 1,
+    currentSeq: 2,
+    isDirtyNow: true,
+    serverMutatedOutline: false,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rInFlightKbOnly.action, "keep_draft_advance_rev");
+  assert.equal(rInFlightKbOnly.state.draftOutline?.nodes[0].title, "本地C");
+  assert.equal(rInFlightKbOnly.state.serverRevision, "rev-A-kb-verified");
+  assert.equal(rInFlightKbOnly.state.undoStack.length, 1);
+
+  // Case 3: Dirty C based on A while server outline diverged to B -> conflict, MUST NOT advance serverRevision!
+  const rDiverged = reconcileOutlineServerPayload({
+    current: baseState,
+    incoming: { revision: "rev-B", outline: { kind: "value", outline: docB } },
+    sentSeq: 2,
+    currentSeq: 2,
+    isDirtyNow: true,
+    serverMutatedOutline: false,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rDiverged.action, "keep_draft_conflict");
+  assert.equal(rDiverged.state.draftOutline?.nodes[0].title, "本地C");
+  assert.equal(rDiverged.state.serverRevision, "rev-A", "Must NEVER advance serverRevision past diverged server outline B");
+  assert.equal(rDiverged.state.conflictError, "conflict");
+
+  // Case 4: In-flight edit while serverMutatedOutline=true (upload direct / promote) -> conflict & keep draft
+  const rPromoteRace = reconcileOutlineServerPayload({
+    current: baseState,
+    incoming: { revision: "rev-promoted", outline: { kind: "value", outline: docB } },
+    sentSeq: 1,
+    currentSeq: 2,
+    isDirtyNow: true,
+    serverMutatedOutline: true,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rPromoteRace.action, "keep_draft_conflict");
+  assert.equal(rPromoteRace.state.draftOutline?.nodes[0].title, "本地C");
+  assert.equal(rPromoteRace.state.serverRevision, "rev-A");
 });
