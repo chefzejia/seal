@@ -349,6 +349,59 @@ export class WorkbenchHost {
     return physical;
   }
 
+  private async computeProjectStamp(root: string): Promise<string> {
+    const statTag = async (label: string, target: string): Promise<string> => {
+      try {
+        const st = await fs.stat(target);
+        return `${label}:${st.size}:${Math.trunc(st.mtimeMs)}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          return `${label}:-`;
+        return `${label}:err`;
+      }
+    };
+    const dirTag = async (label: string, dir: string): Promise<string> => {
+      let names: string[];
+      try {
+        names = (await fs.readdir(dir)).sort();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          return `${label}:-`;
+        return `${label}:err`;
+      }
+      const tags = await Promise.all(
+        names.map((name) => statTag(`${label}/${name}`, path.join(dir, name))),
+      );
+      return `${label}[${tags.join(",")}]`;
+    };
+    const anchorPath = await this.host.ledgerAnchorPath?.(root, false);
+    const parts = await Promise.all([
+      statTag("project", path.join(root, "seal-project.json")),
+      statTag("ledger", path.join(root, "ledger.json")),
+      statTag("outline", path.join(root, "outline.json")),
+      statTag("requirements", path.join(root, "requirements.json")),
+      statTag("binding", path.join(root, "ui-binding.json")),
+      statTag("export", path.join(root, "final", "export.json")),
+      anchorPath ? statTag("anchor", anchorPath) : Promise.resolve("anchor:-"),
+      dirTag("draft", path.join(root, "draft")),
+      dirTag("materials", path.join(root, "materials")),
+      dirTag("final", path.join(root, "final")),
+    ]);
+    return sha256Hex(encoder.encode(parts.join("|")));
+  }
+
+  async projectStamp(input: Record<string, unknown>) {
+    const selected = input.projectId ?? (await this.projectForCwd(input.cwd));
+    if (!selected) return { kind: "not_project" as const };
+    const id = required(selected, "项目");
+    const root = await this.projectRoot(id);
+    return {
+      kind: "project" as const,
+      projectId: id,
+      stamp: await this.computeProjectStamp(root),
+    };
+  }
+
   async projectForCwd(cwd: unknown) {
     if (typeof cwd !== "string" || !path.isAbsolute(cwd)) return null;
     try {
@@ -595,12 +648,14 @@ export class WorkbenchHost {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
       const vaultName = await this.resolveVaultName(snapshot.project.vaultId);
+      const projectStamp = await this.computeProjectStamp(root);
       return {
         kind: "project" as const,
         projectId: id,
         project: snapshot.project,
         vaultName,
         revision: snapshot.revision,
+        projectStamp,
         ready: snapshot.ready,
         complete: snapshot.complete,
         counts: snapshot.counts,
@@ -1107,12 +1162,14 @@ export class WorkbenchHost {
       materials: snapshot.materials,
       c17Issues: snapshot.outlineResults,
     });
+    const projectStamp = await this.computeProjectStamp(root);
     return {
       projectKind: "project" as const,
       projectId,
       project: snapshot.project,
       vaultName,
       revision: snapshot.revision,
+      projectStamp,
       binding,
       outline: snapshot.outline,
       view,
@@ -1873,6 +1930,7 @@ export function registerWorkbenchRoutes(
           create: (input) => service.create(input),
           delete_project: (input) => service.deleteProject(input),
           bind: (input) => service.bind(input),
+          project_stamp: (input) => service.projectStamp(input),
           review: (input) => service.review(input),
           act: (input) => service.act(input),
           finalize: (input) => service.finalize(input),

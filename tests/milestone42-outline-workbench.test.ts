@@ -1193,3 +1193,91 @@ test("M42 regression: WorkbenchHost.outlineSave enforces lockedTemplate, outline
   assert.equal(sentPromptText, "phase2-go");
   assert.deepEqual(editorState.undoStack, []);
 });
+
+test("WorkbenchHost.projectStamp tracks outline/requirements/draft changes lock-free for right-pane auto-refresh", async (t) => {
+  const sandbox = await createSandbox(t, "m42-stamp-");
+  const host = new NodeHostPort();
+  const service = new WorkbenchHost(host);
+  const { actionRoute } = registerTestRoutes(service);
+
+  const nonProject = await service.projectStamp({ cwd: sandbox });
+  assert.equal(nonProject.kind, "not_project");
+
+  const tenderBytes = await buildDocx([p("第一章 投标函"), p("请填写报价：________")].join(""));
+  const tenderPath = path.join(sandbox, "tender.docx");
+  await fs.writeFile(tenderPath, tenderBytes);
+
+  const created = await service.create({
+    name: "自动刷新测试项目",
+    deadline: "2028-06-01",
+    files: [tenderPath],
+    workflowMode: "outline_first",
+  });
+
+  const rev1 = (await service.review({ cwd: created.root })) as {
+    kind: string;
+    projectStamp?: string;
+    outlineSummary?: { kind: string };
+  };
+  assert.equal(rev1.kind, "project");
+  assert.equal(rev1.outlineSummary?.kind, "missing");
+  assert.ok(typeof rev1.projectStamp === "string" && rev1.projectStamp.length === 64);
+
+  const stampRes1 = await actionRoute.fetch(
+    new Request("http://local/api/seal/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operation: "project_stamp", cwd: created.root }),
+    }),
+  );
+  assert.equal(stampRes1.status, 200);
+  const stampBody1 = (await stampRes1.json()) as { kind: string; stamp: string };
+  assert.equal(stampBody1.kind, "project");
+  assert.equal(stampBody1.stamp, rev1.projectStamp);
+
+  // Simulate Agent saving outline.json directly via project CLI/tool.
+  await runProject(host, [
+    "outline",
+    "--project",
+    created.root,
+    "--action",
+    "save",
+    "--volumes",
+    JSON.stringify([{ name: "商务标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:1" }] }]),
+    "--nodes",
+    JSON.stringify([
+      {
+        id: "n-1",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "投标函",
+        kind: "template",
+        included: true,
+      },
+    ]),
+  ]);
+
+  const stamp2 = (await service.projectStamp({ cwd: created.root })) as {
+    kind: string;
+    stamp: string;
+  };
+  assert.equal(stamp2.kind, "project");
+  assert.notEqual(stamp2.stamp, stampBody1.stamp);
+
+  const rev2 = (await service.review({ cwd: created.root })) as {
+    kind: string;
+    projectStamp?: string;
+    outlineSummary?: { kind: string; totalNodes: number };
+  };
+  assert.equal(rev2.projectStamp, stamp2.stamp);
+  assert.equal(rev2.outlineSummary?.kind, "value");
+  assert.equal(rev2.outlineSummary?.totalNodes, 1);
+
+  const out2 = (await service.outlineGet({ projectId: created.id })) as {
+    projectKind: string;
+    projectStamp?: string;
+  };
+  assert.equal(out2.projectKind, "project");
+  assert.equal(out2.projectStamp, stamp2.stamp);
+});

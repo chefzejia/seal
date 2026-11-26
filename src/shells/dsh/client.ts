@@ -107,6 +107,7 @@ type OutlineGetResponse =
       project: ReviewState["project"];
       vaultName: string | null;
       revision: string;
+      projectStamp?: string;
       binding: { sessionId?: string; workspaceId?: string } | null;
       outline: OutlineState;
       view: OutlineViewModel;
@@ -127,6 +128,7 @@ type ReviewState = {
   };
   vaultName?: string | null;
   revision: string;
+  projectStamp?: string;
   ready: boolean;
   blockingCounts: Record<string, number>;
   outlineSummary?: OutlineSummaryOverview;
@@ -336,6 +338,97 @@ currentWindow.__ModuleLoader__.load({
             return () => controller.abort();
           }, [...dependencies, revision]);
           return { state, reload: () => setRevision((value) => value + 1) };
+        }
+        function useProjectAutoRefresh(options: {
+          enabled: boolean;
+          projectId?: string;
+          cwd?: string;
+          initialStamp?: string;
+          sessionSignal?: string;
+          onChange(): void;
+        }) {
+          const onChangeRef = React.useRef(options.onChange);
+          onChangeRef.current = options.onChange;
+          const lastStampRef = React.useRef<string | null>(
+            options.initialStamp ?? null,
+          );
+          const prevInitialStampRef = React.useRef<string | undefined>(
+            options.initialStamp,
+          );
+          const targetKey = `${options.projectId ?? ""}|${options.cwd ?? ""}`;
+          const prevTargetRef = React.useRef(targetKey);
+          if (prevTargetRef.current !== targetKey) {
+            prevTargetRef.current = targetKey;
+            prevInitialStampRef.current = options.initialStamp;
+            lastStampRef.current = options.initialStamp ?? null;
+          } else if (
+            options.initialStamp &&
+            options.initialStamp !== prevInitialStampRef.current
+          ) {
+            prevInitialStampRef.current = options.initialStamp;
+            lastStampRef.current = options.initialStamp;
+          }
+          React.useEffect(() => {
+            if (!options.enabled || (!options.projectId && !options.cwd))
+              return;
+            let disposed = false;
+            let inFlight = false;
+            let controller: AbortController | null = null;
+            const check = () => {
+              if (
+                disposed ||
+                inFlight ||
+                (typeof document !== "undefined" &&
+                  document.visibilityState === "hidden")
+              )
+                return;
+              inFlight = true;
+              controller = new AbortController();
+              const payload = options.projectId
+                ? { projectId: options.projectId }
+                : { cwd: options.cwd };
+              api<{ kind: string; stamp?: string }>(
+                "project_stamp",
+                payload,
+                controller.signal,
+              )
+                .then((res) => {
+                  if (disposed || res.kind !== "project" || !res.stamp) return;
+                  if (lastStampRef.current === null) {
+                    lastStampRef.current = res.stamp;
+                  } else if (lastStampRef.current !== res.stamp) {
+                    lastStampRef.current = res.stamp;
+                    onChangeRef.current();
+                  }
+                })
+                .catch(() => {
+                  /* Ignore transient background poll errors. */
+                })
+                .finally(() => {
+                  inFlight = false;
+                });
+            };
+            const timer = window.setInterval(check, 2500);
+            const onFocus = () => check();
+            const onVisibility = () => {
+              if (document.visibilityState !== "hidden") check();
+            };
+            window.addEventListener("focus", onFocus);
+            document.addEventListener("visibilitychange", onVisibility);
+            if (options.sessionSignal !== undefined) check();
+            return () => {
+              disposed = true;
+              window.clearInterval(timer);
+              window.removeEventListener("focus", onFocus);
+              document.removeEventListener("visibilitychange", onVisibility);
+              controller?.abort();
+            };
+          }, [
+            options.enabled,
+            options.projectId,
+            options.cwd,
+            options.sessionSignal,
+          ]);
         }
         function useAction() {
           const [busy, setBusy] = React.useState(false),
@@ -2174,7 +2267,17 @@ currentWindow.__ModuleLoader__.load({
             (listener) => ctx.sessions.list.subscribe(listener),
             () => ctx.sessions.list.getSnapshot(),
           ) as any;
-          const cwd = sessions.byId[sessionId]?.cwd;
+          const sessionEntry = sessions.byId[sessionId];
+          const cwd = sessionEntry?.cwd;
+          const sessionSignal = sessionEntry
+            ? JSON.stringify([
+                sessionEntry.status ?? null,
+                sessionEntry.running ?? null,
+                sessionEntry.busy ?? null,
+                sessionEntry.updatedAt ?? null,
+                sessionEntry.lastActivityAt ?? null,
+              ])
+            : "";
           const [pages, setPages] = React.useState<Record<string, number>>({}),
             [sections, setSections] = React.useState<Record<string, string>>({}),
             [tab, setTab] = React.useState("review");
@@ -2194,6 +2297,14 @@ currentWindow.__ModuleLoader__.load({
             } | null>(null);
           const review =
             resource.state.kind === "value" ? resource.state.value : null;
+          useProjectAutoRefresh({
+            enabled: !dirty && Boolean(cwd),
+            cwd,
+            initialStamp:
+              review?.kind === "project" ? review.projectStamp : undefined,
+            sessionSignal,
+            onChange: resource.reload,
+          });
           React.useEffect(() => {
             if (
               review?.kind === "project" &&
@@ -5226,6 +5337,12 @@ currentWindow.__ModuleLoader__.load({
                 canonicalOutlineDigest(baselineOutline) !==
                   canonicalOutlineDigest(draftOutline)),
           );
+          useProjectAutoRefresh({
+            enabled: !isDirty && Boolean(props.projectId),
+            projectId: props.projectId,
+            initialStamp: payload?.projectStamp,
+            onChange: resource.reload,
+          });
 
           React.useEffect(() => {
             try {
