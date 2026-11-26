@@ -23,6 +23,17 @@ import {
   renderPdfBytesToPngs,
 } from "./pdf-engine.js";
 
+const VALIDATED_IMAGE_CACHE_MAX = 4096;
+const validatedImageCache = new Set<string>();
+
+function rememberValidatedImage(key: string): void {
+  if (validatedImageCache.size >= VALIDATED_IMAGE_CACHE_MAX) {
+    const oldest = validatedImageCache.values().next().value;
+    if (oldest !== undefined) validatedImageCache.delete(oldest);
+  }
+  validatedImageCache.add(key);
+}
+
 export class NodeHostPort implements HostPort {
   async writeFiles(files: readonly FileWrite[]): Promise<void> { await writeFileBatch(files); }
 
@@ -410,8 +421,13 @@ End Sub`;
   }
 
   async validateImage(bytes: Uint8Array, mime: string): Promise<void> {
+    const cacheKey = `${mime}:${bytes.length}:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (validatedImageCache.has(cacheKey)) {
+      return;
+    }
     if (mime === 'image/bmp' || mime === 'image/x-ms-bmp') {
       validateBmp(bytes);
+      rememberValidatedImage(cacheKey);
       return;
     }
     const rasterFormats: Record<string, string> = {
@@ -424,6 +440,7 @@ End Sub`;
       const metadata = await decoder.metadata();
       if (metadata.format !== rasterFormat) throw new Error(`图片内容与声明的 ${mime} 格式不符`);
       await decoder.raw().toBuffer();
+      rememberValidatedImage(cacheKey);
       return;
     }
     const extensions: Record<string, string> = {
@@ -440,6 +457,7 @@ End Sub`;
       fs.writeFileSync(source, bytes, { flag: 'wx' });
       const result = await this.convertImageToPng(source, path.join(directory, 'output'));
       await validateImageBytes(fs.readFileSync(result.filePath), 'image/png');
+      rememberValidatedImage(cacheKey);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
 import { NodeHostPort } from '../src/shells/node-host.js';
 import { KnowledgeBase } from '../src/core/kb/index.js';
 
@@ -51,4 +52,111 @@ test('KnowledgeBase.health distinguishes unknown, invalid, expired, imminent and
   assert.ok(report.issues.some(issue => issue.id === expired.id && issue.code === 'expired'));
   assert.ok(report.issues.some(issue => issue.id === imminent.id && issue.code === 'expiring_soon'));
   await assert.rejects(kb.health(vault.vaultId, '2026-02-30'), /合法 YYYY-MM-DD/);
+});
+
+test('KnowledgeBase.health checkImages modes avoid unnecessary image decodes and vault-wide scans while preserving full checks', async t => {
+  const validPng = await sharp({
+    create: { width: 2, height: 2, channels: 4, background: { r: 30, g: 120, b: 210, alpha: 1 } },
+  }).png().toBuffer();
+  const home = path.resolve('.tmp', `kb-health-modes-${randomUUID()}`);
+  await fs.mkdir(home, { recursive: true });
+  const previous = process.env.SEAL_HOME;
+  process.env.SEAL_HOME = home;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.SEAL_HOME;
+    else process.env.SEAL_HOME = previous;
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  const baseHost = new NodeHostPort();
+  let validateImageCalls = 0;
+  const listedDirs: string[] = [];
+  const spyHost = Object.create(baseHost) as NodeHostPort;
+  spyHost.validateImage = async (bytes: Uint8Array, mime: string) => {
+    validateImageCalls += 1;
+    return baseHost.validateImage(bytes, mime);
+  };
+  spyHost.listFiles = async (directory: string) => {
+    listedDirs.push(directory);
+    return baseHost.listFiles(directory);
+  };
+
+  const vaultsRoot = path.join(home, 'vaults');
+  const kb = new KnowledgeBase(spyHost, vaultsRoot);
+  const vault = await kb.createVault({ vaultId: 'mode-vault', name: '体检模式验证柜' });
+  await kb.save(vault.vaultId, {
+    action: 'update',
+    kind: 'subject',
+    fields: { legalName: '本企业合成主体' },
+  });
+
+  const vaultDir = path.join(vaultsRoot, vault.vaultId);
+  await fs.mkdir(path.join(vaultDir, 'files'), { recursive: true });
+  await fs.mkdir(path.join(vaultDir, 'inbox', 'batch-1'), { recursive: true });
+  await fs.writeFile(path.join(vaultDir, 'files', 'shared.png'), validPng);
+  await fs.writeFile(path.join(vaultDir, 'files', 'corrupt.png'), Buffer.from('not-a-real-png'));
+  await fs.writeFile(path.join(vaultDir, 'inbox', 'batch-1', 'candidate-1.md'), '---\nprocessed: true\n---\n');
+
+  const r1 = await kb.save(vault.vaultId, {
+    action: 'create',
+    kind: 'record',
+    fields: { type: '其他', title: '共享图记录一', holder: '本企业合成主体', validUntil: '长期', files: ['files/shared.png'] },
+    body: '',
+  });
+  const r2 = await kb.save(vault.vaultId, {
+    action: 'create',
+    kind: 'record',
+    fields: { type: '其他', title: '共享图记录二', holder: '本企业合成主体', validUntil: '长期', files: ['files/shared.png'] },
+    body: '',
+  });
+  const missingRecord = await kb.save(vault.vaultId, {
+    action: 'create',
+    kind: 'record',
+    fields: { type: '其他', title: '缺文件记录', holder: '本企业合成主体', validUntil: '长期', files: ['files/shared.png'] },
+    body: '',
+  });
+  const corruptRecord = await kb.save(vault.vaultId, {
+    action: 'create',
+    kind: 'record',
+    fields: { type: '其他', title: '坏图记录', holder: '本企业合成主体', validUntil: '长期', files: ['files/shared.png'] },
+    body: '',
+  });
+
+  // Bypass save-time validation to simulate on-disk drift (missing / corrupted file).
+  const missingMd = path.join(vaultDir, 'records', `${missingRecord.id}.md`);
+  await fs.writeFile(missingMd, (await fs.readFile(missingMd, 'utf8')).replace('files/shared.png', 'files/missing.png'));
+  const corruptMd = path.join(vaultDir, 'records', `${corruptRecord.id}.md`);
+  await fs.writeFile(corruptMd, (await fs.readFile(corruptMd, 'utf8')).replace('files/shared.png', 'files/corrupt.png'));
+
+  validateImageCalls = 0;
+  listedDirs.length = 0;
+  const noneReport = await kb.health(vault.vaultId, '2026-11-19', { checkImages: 'none' });
+  assert.equal(validateImageCalls, 0);
+  assert.equal(noneReport.records.length, 4);
+  assert.ok(!noneReport.issues.some(issue => issue.code === 'file_missing' || issue.code === 'image_invalid'));
+  assert.ok(listedDirs.every(dir => dir !== vaultDir && !dir.includes(`${path.sep}files`) && !dir.includes(`${path.sep}inbox`)));
+
+  validateImageCalls = 0;
+  const existenceReport = await kb.health(vault.vaultId, '2026-11-19', { checkImages: 'existence' });
+  assert.equal(validateImageCalls, 0);
+  assert.ok(existenceReport.issues.some(issue => issue.id === missingRecord.id && issue.code === 'file_missing'));
+  assert.ok(!existenceReport.issues.some(issue => issue.code === 'image_invalid'));
+
+  validateImageCalls = 0;
+  const fullReport = await kb.health(vault.vaultId, '2026-11-19');
+  // shared.png is referenced by both r1 and r2, but must only be decoded once per health() call; corrupt.png is the 2nd call.
+  assert.equal(validateImageCalls, 2);
+  assert.ok(fullReport.issues.some(issue => issue.id === missingRecord.id && issue.code === 'file_missing'));
+  assert.ok(fullReport.issues.some(issue => issue.id === corruptRecord.id && issue.code === 'image_invalid'));
+  assert.ok(!fullReport.issues.some(issue => (issue.id === r1.id || issue.id === r2.id) && issue.code === 'image_invalid'));
+
+  // NodeHostPort.validateImage caches valid images by content digest without masking corrupted bytes.
+  await baseHost.validateImage(validPng, 'image/png');
+  await baseHost.validateImage(validPng, 'image/png');
+  const idatOffset = validPng.indexOf('IDAT');
+  assert.ok(idatOffset > 0);
+  const mutated = Buffer.from(validPng);
+  mutated[idatOffset + 6] ^= 0xff;
+  await assert.rejects(baseHost.validateImage(mutated, 'image/png'));
+  await assert.rejects(baseHost.validateImage(validPng.subarray(0, 24), 'image/png'));
 });

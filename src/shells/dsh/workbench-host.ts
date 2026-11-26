@@ -420,7 +420,7 @@ export class WorkbenchHost {
       try {
         const metadata = await kb.metadata(id),
           subject = await kb.get(id, "subject"),
-          health = await kb.health(id, date),
+          health = await kb.health(id, date, { checkImages: "none" }),
           materials = await this.listVaultMaterials(kb, id),
           pendingBatches = await kb.listPendingBatches(id);
         vaults.push({
@@ -1479,12 +1479,14 @@ export class WorkbenchHost {
 
   private async listVaultMaterials(kb: KnowledgeBase, vaultId: string) {
     if (!this.host.listFiles) throw new Error("宿主资料枚举能力不可用");
-    const files = (await this.host.listFiles(kb.vaultRoot(vaultId)))
-      .filter((file) => /^materials\/[^/]+\.md$/.test(file))
+    const materialsDir = path.join(kb.vaultRoot(vaultId), "materials");
+    if (!(await this.host.stat(materialsDir)).isDirectory) return [];
+    const files = (await this.host.listFiles(materialsDir))
+      .filter((file) => /^[^/]+\.md$/.test(file))
       .sort();
     const materials = [];
     for (const file of files) {
-      const id = file.slice("materials/".length, -3);
+      const id = file.slice(0, -3);
       try {
         materials.push(await kb.get(vaultId, "material", id));
       } catch {
@@ -1510,6 +1512,7 @@ export class WorkbenchHost {
         health = await kb.health(
           vaultId,
           new Date().toISOString().slice(0, 10),
+          { checkImages: "existence" },
         ),
         materials = await this.listVaultMaterials(kb, vaultId),
         pendingBatches = await kb.listPendingBatches(vaultId);

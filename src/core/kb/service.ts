@@ -1019,30 +1019,79 @@ export class KnowledgeBase {
     return issues;
   }
 
-  private async fileIssues(vaultId: string, entry: KbEntry): Promise<HealthIssue[]> {
+  private async listEntryFiles(
+    vaultId: string,
+    kinds: readonly ('record' | 'material')[] = ['record', 'material'],
+  ): Promise<Array<{ kind: 'record' | 'material'; id: string }>> {
+    if (!this.host.listFiles) throw new Error('HostPort.listFiles 不可用');
+    const root = this.vaultRoot(vaultId);
+    const entries: Array<{ kind: 'record' | 'material'; id: string }> = [];
+    for (const kind of kinds) {
+      const dir = this.host.joinPath(root, kind === 'record' ? 'records' : 'materials');
+      if (!(await this.host.stat(dir)).isDirectory) continue;
+      for (const relative of await this.host.listFiles(dir)) {
+        if (/^[^/]+\.md$/.test(relative)) {
+          entries.push({ kind, id: relative.slice(0, -3) });
+        }
+      }
+    }
+    return entries;
+  }
+
+  private async fileIssues(
+    vaultId: string,
+    entry: KbEntry,
+    mode: 'full' | 'existence' | 'none' = 'full',
+    cache?: Map<string, 'ok' | 'file_missing' | 'image_invalid'>,
+  ): Promise<HealthIssue[]> {
+    if (mode === 'none') return [];
     const issues: HealthIssue[] = [];
     for (const file of stringList(entry.fields.files)) {
-      const stored = this.host.joinPath(this.vaultRoot(vaultId), file);
-      const stat = await this.host.stat(stored);
-      if (!stat.exists || stat.isDirectory || stat.size === 0) {
+      const cacheKey = `${mode}:${file}`;
+      const cached = cache?.get(cacheKey);
+      if (cached === 'ok') continue;
+      if (cached === 'file_missing') {
         issues.push({ code: 'file_missing', kind: entry.kind, id: entry.id, field: 'files', message: `引用的原件或附件缺失：${file}` });
         continue;
       }
-      const mime = imageMime(file);
-      if (mime !== undefined) {
-        try {
-          if (!this.host.validateImage) throw new Error('HostPort.validateImage 不可用');
-          await this.host.validateImage(await this.host.readBytes(stored), mime);
-        } catch {
-          issues.push({ code: 'image_invalid', kind: entry.kind, id: entry.id, field: 'files', message: `图片无法解码：${file}` });
+      if (cached === 'image_invalid') {
+        issues.push({ code: 'image_invalid', kind: entry.kind, id: entry.id, field: 'files', message: `图片无法解码：${file}` });
+        continue;
+      }
+      const stored = this.host.joinPath(this.vaultRoot(vaultId), file);
+      const stat = await this.host.stat(stored);
+      if (!stat.exists || stat.isDirectory || stat.size === 0) {
+        cache?.set(cacheKey, 'file_missing');
+        issues.push({ code: 'file_missing', kind: entry.kind, id: entry.id, field: 'files', message: `引用的原件或附件缺失：${file}` });
+        continue;
+      }
+      if (mode === 'full') {
+        const mime = imageMime(file);
+        if (mime !== undefined) {
+          try {
+            if (!this.host.validateImage) throw new Error('HostPort.validateImage 不可用');
+            await this.host.validateImage(await this.host.readBytes(stored), mime);
+          } catch {
+            cache?.set(cacheKey, 'image_invalid');
+            issues.push({ code: 'image_invalid', kind: entry.kind, id: entry.id, field: 'files', message: `图片无法解码：${file}` });
+            continue;
+          }
         }
       }
+      cache?.set(cacheKey, 'ok');
     }
     return issues;
   }
 
-  private async recordHealth(vaultId: string, entry: KbEntry, subject: KbEntry, referenceDate: string) {
-    const issues = [...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry)];
+  private async recordHealth(
+    vaultId: string,
+    entry: KbEntry,
+    subject: KbEntry,
+    referenceDate: string,
+    imageMode: 'full' | 'existence' | 'none' = 'full',
+    fileCache?: Map<string, 'ok' | 'file_missing' | 'image_invalid'>,
+  ) {
+    const issues = [...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry, imageMode, fileCache)];
     const add = (code: string, message: string, field?: string) => issues.push({ code, kind: 'record', id: entry.id, message, field });
     const validity = recordValidity(entry, referenceDate);
     if (validity === 'unknown' && !nonempty(entry.fields.validUntil)) add('validity_unknown', '证据效期未知', 'validUntil');
@@ -1072,23 +1121,26 @@ export class KnowledgeBase {
     return { referenceDate, issues: entry.kind === 'subject' ? this.subjectIssues(entry) : [...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry)] };
   }
 
-  async health(vaultId: string, referenceDate: string): Promise<HealthReport> {
+  async health(
+    vaultId: string,
+    referenceDate: string,
+    options?: { checkImages?: 'full' | 'existence' | 'none' },
+  ): Promise<HealthReport> {
     assertHealthReferenceDate(referenceDate);
+    const imageMode = options?.checkImages ?? 'full';
     const subject = await this.get(vaultId, 'subject');
     const issues = this.subjectIssues(subject), records: HealthReport['records'] = [];
-    if (!this.host.listFiles) throw new Error('HostPort.listFiles 不可用');
-    const files = await this.host.listFiles(this.vaultRoot(vaultId));
-    for (const relative of files.filter(file => /^(records|materials)\/[^/]+\.md$/.test(file))) {
-      const kind = relative.startsWith('records/') ? 'record' : 'material';
-      const id = relative.slice(relative.indexOf('/') + 1, -3);
+    const entryFiles = await this.listEntryFiles(vaultId, ['record', 'material']);
+    const fileCache = new Map<string, 'ok' | 'file_missing' | 'image_invalid'>();
+    for (const { kind, id } of entryFiles) {
       let entry: KbEntry;
       try { entry = await this.get(vaultId, kind, id); }
       catch { issues.push({ code: 'entry_malformed', kind, id, message: '资料记录无法解析' }); continue; }
       if (kind !== 'record') {
-        issues.push(...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry));
+        issues.push(...this.metadataIssues(entry), ...await this.fileIssues(vaultId, entry, imageMode, fileCache));
         continue;
       }
-      const result = await this.recordHealth(vaultId, entry, subject, referenceDate);
+      const result = await this.recordHealth(vaultId, entry, subject, referenceDate, imageMode, fileCache);
       records.push({ ...entry, validity: result.validity, subject: result.subject });
       issues.push(...result.issues);
     }
@@ -1117,11 +1169,9 @@ export class KnowledgeBase {
     if (input.validity !== undefined && !['valid', 'expiring_soon', 'expired', 'unknown', 'not_applicable'].includes(input.validity)) throw new Error('效期筛选值无效');
     if (input.validity !== undefined && input.referenceDate === undefined) throw new Error('效期筛选需要截标日，请提供 --project 或 --reference-date YYYY-MM-DD');
     if (input.referenceDate !== undefined) assertHealthReferenceDate(input.referenceDate);
-    const paths = (await this.host.listFiles(this.vaultRoot(vaultId))).filter(file => /^(records|materials)\/.+\.md$/.test(file));
+    const entryFiles = await this.listEntryFiles(vaultId, ['record', 'material']);
     const results: Array<{ id: string; kind: KbKind; title: string; fields: KbFields; snippet: string; validity?: string }> = [];
-    for (const relative of paths) {
-      const kind = relative.startsWith('records/') ? 'record' : 'material';
-      const id = relative.slice(relative.indexOf('/') + 1, -3);
+    for (const { kind, id } of entryFiles) {
       const entry = await this.get(vaultId, kind, id);
       if (input.type && entry.fields.type !== input.type) continue;
       const tags = stringList(entry.fields.tags);

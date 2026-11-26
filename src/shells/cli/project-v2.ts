@@ -546,7 +546,7 @@ async function loadFactContext(
       const kb = new KnowledgeBase(host, kbRoot),
         [currentSubject, health] = await Promise.all([
           kb.get(project.vaultId, "subject"),
-          kb.health(project.vaultId, project.deadline),
+          kb.health(project.vaultId, project.deadline, { checkImages: "none" }),
         ]);
       subject = currentSubject;
       for (const record of health.records) {
