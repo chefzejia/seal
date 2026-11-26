@@ -44,6 +44,7 @@ import {
 } from "../../core/bid/outline.js";
 import type { RequirementsState } from "../../core/bid/requirements.js";
 import {
+  applyOutlineDraftEdit,
   bindEvidenceToNode,
   buildOutlineRevisionPrompt,
   buildOutlineView,
@@ -5473,14 +5474,33 @@ currentWindow.__ModuleLoader__.load({
             };
           }, [isDirty]);
 
-          const commitEdit = (next: OutlineDocument) => {
-            if (!draftOutline) return;
+          const commitEdit = (
+            nextOrUpdater:
+              | OutlineDocument
+              | ((live: OutlineDocument) => OutlineDocument),
+          ) => {
+            const liveState = editorStateRef.current;
+            if (!liveState.draftOutline) return;
+            const transitioned = applyOutlineDraftEdit(
+              liveState,
+              nextOrUpdater,
+            );
             localEditSeqRef.current += 1;
-            setUndoStack((prev) => [...prev.slice(-49), draftOutline]);
-            setRedoStack([]);
-            setDraftOutline(next);
-            setConflictError("");
-            setConfirmMissing(false);
+            editorStateRef.current = {
+              ...liveState,
+              ...transitioned,
+              isDirty: Boolean(
+                transitioned.draftOutline &&
+                  (!liveState.baselineOutline ||
+                    canonicalOutlineDigest(liveState.baselineOutline) !==
+                      canonicalOutlineDigest(transitioned.draftOutline)),
+              ),
+            };
+            setUndoStack(transitioned.undoStack);
+            setRedoStack(transitioned.redoStack);
+            setDraftOutline(transitioned.draftOutline);
+            setConflictError(transitioned.conflictError);
+            setConfirmMissing(transitioned.confirmMissing);
             deleteConfirm.reset();
           };
 
@@ -5929,16 +5949,17 @@ currentWindow.__ModuleLoader__.load({
                   syncFromPayload(res);
                 } else if (reconciled.action === "keep_draft_advance_rev") {
                   setServerRevision(reconciled.state.serverRevision);
+                  editorStateRef.current = {
+                    ...editorStateRef.current,
+                    serverRevision: reconciled.state.serverRevision,
+                  };
                   loadedRevisionRef.current = res.revision;
                   if (!persistDirectly) {
-                    const liveDraft = editorStateRef.current.draftOutline;
-                    if (liveDraft) {
-                      commitEdit(
-                        bindEvidenceToNode(liveDraft, nodeId, res.binding, {
-                          updatedBy: "human",
-                        }),
-                      );
-                    }
+                    commitEdit((live) =>
+                      bindEvidenceToNode(live, nodeId, res.binding, {
+                        updatedBy: "human",
+                      }),
+                    );
                   }
                 } else {
                   setConflictError(reconciled.state.conflictError);

@@ -24,6 +24,7 @@ import {
   type OutlineNode,
 } from "../src/core/bid/outline.js";
 import {
+  applyOutlineDraftEdit,
   bindEvidenceToNode,
   buildOutlineView,
   canDeleteOutlineNode,
@@ -1904,4 +1905,196 @@ test("GPT audit regressions: KB material & WebP Phase-2 edit/C05/C17 E2E, omitte
   assert.equal(rPromoteRace.action, "keep_draft_conflict");
   assert.equal(rPromoteRace.state.draftOutline?.nodes[0].title, "本地C");
   assert.equal(rPromoteRace.state.serverRevision, "rev-A");
+
+  // Case 5 (R2 #3): Brand-new unsaved blank outline (baseline=null, incoming=missing) uploads material -> no false conflict!
+  const rBlankUpload = reconcileOutlineServerPayload({
+    current: { ...baseState, baselineOutline: null, draftOutline: docC },
+    incoming: { revision: "rev-missing-after-upload", outline: { kind: "missing" } },
+    sentSeq: 1,
+    currentSeq: 1,
+    isDirtyNow: true,
+    serverMutatedOutline: false,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rBlankUpload.action, "keep_draft_advance_rev");
+  assert.equal(rBlankUpload.state.serverRevision, "rev-missing-after-upload");
+  // Whereas incoming.outline.kind === 'error' MUST still conflict
+  const rBlankError = reconcileOutlineServerPayload({
+    current: { ...baseState, baselineOutline: null, draftOutline: docC },
+    incoming: { revision: "rev-err", outline: { kind: "error", reason: "corrupt" } },
+    sentSeq: 1,
+    currentSeq: 1,
+    isDirtyNow: true,
+    serverMutatedOutline: false,
+    conflictMessage: "conflict",
+  });
+  assert.equal(rBlankError.action, "keep_draft_conflict");
+
+  // Case 6 (R2 #4): Edit C -> D during in-flight upload; binding uses live D so Undo reverts ONLY binding back to D
+  const docD: OutlineDocument = {
+    format: "seal-outline-1",
+    volumes: [{ name: "商务标" }],
+    nodes: [{ id: "n1", volume: "商务标", parentId: null, level: 1, title: "上传期间修改D", kind: "authored", included: true }],
+  };
+  const afterEditD = applyOutlineDraftEdit(
+    { draftOutline: docC, undoStack: [docA], redoStack: [], conflictError: "", confirmMissing: false },
+    docD,
+  );
+  const afterBindOnD = applyOutlineDraftEdit(afterEditD, (live) =>
+    bindEvidenceToNode(live, "n1", { source: "material", ref: "materials/outline/new.png" }),
+  );
+  assert.equal(afterBindOnD.draftOutline?.nodes[0].title, "上传期间修改D");
+  assert.equal(afterBindOnD.draftOutline?.nodes[0].evidence?.length, 1);
+  // Popping one Undo step returns D (NOT stale C!)
+  assert.equal(afterBindOnD.undoStack.at(-1)?.nodes[0].title, "上传期间修改D");
+  assert.equal(afterBindOnD.undoStack.at(-1)?.nodes[0].evidence, undefined);
+});
+
+test("GPT R2 regressions: authored node with image-bearing KB material fails C17 until mounted; direct mode fails C05 if physical KB material image deleted on disk", async (t) => {
+  const sandbox = await createSandbox(t, "m42-gpt-r2-");
+  const host = new NodeHostPort();
+  const service = new WorkbenchHost(host);
+
+  const kbRoot = path.join(sandbox, "seal-home", "vaults");
+  await fs.mkdir(kbRoot, { recursive: true });
+  const kb = new KnowledgeBase(host, kbRoot);
+  const vault = await kb.createVault({ name: "R2回归库", vaultId: "v-gpt-r2" });
+  await kb.save(vault.vaultId, {
+    action: "update",
+    kind: "subject",
+    fields: { legalName: "合成测试企业有限公司" },
+  });
+  const imgMat = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "material",
+    fields: { type: "工艺图示", title: "制造工艺流程图" },
+    body: "流程图说明",
+  });
+  const imgMatAttached = await kb.save(vault.vaultId, {
+    action: "attach_file",
+    kind: "material",
+    id: imgMat.id,
+    file: { fileName: "flow.png", bytes: PNG_1X1_RED },
+  });
+  const imgMatFile = (imgMatAttached.fields.files as string[])[0];
+
+  const tenderPath = path.join(sandbox, "tender.docx");
+  await fs.writeFile(tenderPath, await buildDocx([p("一、制造工艺方案")].join("")));
+
+  // Part A (R2 #1): authored node with image-bearing KB material MUST fail C17 when unmounted, pass once mounted
+  const projOutline = await service.create({
+    name: "自拟带图素材C17验证",
+    deadline: "2028-06-01",
+    vaultId: vault.vaultId,
+    files: [tenderPath],
+    workflowMode: "outline_first",
+  });
+  let st = (await service.outlineGet({ projectId: projOutline.id })) as any;
+  st = await service.outlineSave({
+    projectId: projOutline.id,
+    expectedRevision: st.revision,
+    volumes: [{ name: "技术标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:0" }] }],
+    nodes: [
+      {
+        id: "n-authored-img",
+        volume: "技术标",
+        parentId: null,
+        level: 1,
+        title: "一、制造工艺方案",
+        kind: "authored",
+        included: true,
+        evidence: [{ source: "kb", ref: imgMat.id, label: "制造工艺流程图" }],
+      },
+    ],
+  });
+  await service.outlineConfirm({ projectId: projOutline.id, expectedRevision: st.revision });
+  await runProject(host, [
+    "extract",
+    "--project",
+    projOutline.root,
+    "--draft",
+    "技术标",
+    "--tender",
+    "tender/1.docx",
+    "--ranges",
+    JSON.stringify([{ from: "p:0", to: "p:0" }]),
+  ]);
+  const checkUnmounted = (await runProject(host, ["check", "--project", projOutline.root])) as {
+    projectCounts: Record<string, number>;
+  };
+  assert.ok(
+    checkUnmounted.projectCounts.C17 > 0,
+    "Authored node bound to an image-bearing KB material must NOT bypass C17 when unmounted",
+  );
+  await runProject(host, [
+    "edit",
+    "--project",
+    projOutline.root,
+    "--draft",
+    "技术标",
+    "--ops",
+    JSON.stringify([
+      {
+        op: "insert",
+        at: "p:0",
+        position: "after",
+        markdown: `![流程图](kb:${imgMat.id}/${imgMatFile})`,
+      },
+    ]),
+  ]);
+  const checkMounted = (await runProject(host, ["check", "--project", projOutline.root])) as {
+    projectCounts: Record<string, number>;
+  };
+  assert.equal(checkMounted.projectCounts.C17, 0);
+  assert.equal(checkMounted.projectCounts.C05, 0);
+
+  // Part B (R2 #2): Direct mode (no outline!) -> mount KB material image -> delete ONLY the physical PNG on disk -> C05 MUST fail closed!
+  const projDirect = await service.create({
+    name: "直出模式物理删图C05验证",
+    deadline: "2028-06-01",
+    vaultId: vault.vaultId,
+    files: [tenderPath],
+    workflowMode: "direct",
+  });
+  await runProject(host, [
+    "extract",
+    "--project",
+    projDirect.root,
+    "--draft",
+    "技术标",
+    "--tender",
+    "tender/1.docx",
+    "--ranges",
+    JSON.stringify([{ from: "p:0", to: "p:0" }]),
+  ]);
+  await runProject(host, [
+    "edit",
+    "--project",
+    projDirect.root,
+    "--draft",
+    "技术标",
+    "--ops",
+    JSON.stringify([
+      {
+        op: "insert",
+        at: "p:0",
+        position: "after",
+        markdown: `![流程图](kb:${imgMat.id}/${imgMatFile})`,
+      },
+    ]),
+  ]);
+  const directBeforeDelete = (await runProject(host, ["check", "--project", projDirect.root])) as {
+    projectCounts: Record<string, number>;
+  };
+  assert.equal(directBeforeDelete.projectCounts.C05, 0);
+
+  // Delete ONLY the physical PNG on disk while preserving materials/<id>.md intact
+  await fs.unlink(path.join(kbRoot, vault.vaultId, imgMatFile));
+  const directAfterDelete = (await runProject(host, ["check", "--project", projDirect.root])) as {
+    projectCounts: Record<string, number>;
+  };
+  assert.ok(
+    directAfterDelete.projectCounts.C05 > 0,
+    "Deleting physical KB material image file must fail closed in C05 even in direct mode without outline",
+  );
 });

@@ -1885,11 +1885,13 @@ export async function checkOutlineConsistency(input: {
 
       for (const binding of node.evidence ?? []) {
         if (binding.source === "kb") {
+          const isKbMaterial = input.kbMaterialIds?.has(binding.ref) === true;
           let requireMedia =
-            node.kind === "attachment" &&
+            (node.kind === "attachment" || isKbMaterial) &&
             input.kbRecordHasFiles?.get(binding.ref) === true;
           let expectedKbHashes: readonly string[] | undefined;
           let kbMediaError: string | undefined;
+          let kbMediaIsNoImages = false;
           if (input.kbRecordMediaStates) {
             const mediaState = input.kbRecordMediaStates.get(binding.ref);
             if (!mediaState) {
@@ -1897,7 +1899,7 @@ export async function checkOutlineConsistency(input: {
             } else if (mediaState.kind === "error") {
               kbMediaError = mediaState.reason;
             } else if (mediaState.kind === "ok") {
-              if (node.kind === "attachment") {
+              if (node.kind === "attachment" || isKbMaterial) {
                 requireMedia = true;
                 if (mediaState.hashes.length === 0) {
                   kbMediaError = "知识库记录图片哈希为空";
@@ -1905,8 +1907,13 @@ export async function checkOutlineConsistency(input: {
                   expectedKbHashes = mediaState.hashes;
                 }
               }
-            } else if (mediaState.kind === "no_images" && requireMedia) {
-              kbMediaError = "知识库记录未包含可核验的图片附件";
+            } else if (mediaState.kind === "no_images") {
+              kbMediaIsNoImages = true;
+              if (requireMedia && node.kind === "attachment") {
+                kbMediaError = "知识库记录未包含可核验的图片附件";
+              } else if (isKbMaterial) {
+                requireMedia = false;
+              }
             }
           } else if (requireMedia && input.kbRecordImageHashes?.has(binding.ref)) {
             const provided = input.kbRecordImageHashes.get(binding.ref)!;
@@ -1929,11 +1936,16 @@ export async function checkOutlineConsistency(input: {
             });
             continue;
           }
-          const isKbMaterial = input.kbMaterialIds?.has(binding.ref) === true;
-          if (isKbMaterial && !requireMedia) {
-            // Text-only or prose reference KB materials (kind="material") have no {{record:...}}
-            // structured fact citation syntax; their readability is verified above and their
-            // section presence is enforced by missing_section.
+          const isProseOnlyKbMaterial =
+            isKbMaterial &&
+            !requireMedia &&
+            (input.kbRecordMediaStates
+              ? kbMediaIsNoImages
+              : input.kbRecordHasFiles?.get(binding.ref) !== true);
+          if (isProseOnlyKbMaterial) {
+            // Text-only prose reference KB materials (kind="material" with zero images)
+            // have no {{record:...}} structured fact citation syntax; their readability is
+            // verified above and section presence is enforced by missing_section.
             continue;
           }
           const mounted = activeVolumeFills.some((fill) => {

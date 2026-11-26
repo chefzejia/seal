@@ -522,6 +522,7 @@ async function loadFactContext(
   };
   knowledgeError?: string;
   quoteErrors: Map<string, string>;
+  kbMediaFileErrors: Map<string, string>;
   kbRecords: OutlineKbRecordSummary[];
   kbRecordHasFiles: Map<string, boolean>;
   kbMaterials: Map<string, KbEntry>;
@@ -529,6 +530,7 @@ async function loadFactContext(
   const records = new Map<string, FactRecord>(),
     quotes = new Map<string, string>(),
     quoteErrors = new Map<string, string>(),
+    kbMediaFileErrors = new Map<string, string>(),
     kbRecords: OutlineKbRecordSummary[] = [],
     kbRecordHasFiles = new Map<string, boolean>(),
     kbMaterials = new Map<string, KbEntry>();
@@ -639,6 +641,47 @@ async function loadFactContext(
         ),
         thirdPartyCreditCodes,
       };
+      const physicalVaultRoot = await realpath(kb.vaultRoot(project.vaultId));
+      const checkedMediaRefs = new Set<string>();
+      for (const reference of references) {
+        if (!reference.startsWith("kb:")) continue;
+        let decoded: string;
+        try {
+          decoded = decodeURIComponent(reference);
+        } catch {
+          continue;
+        }
+        if (checkedMediaRefs.has(decoded)) continue;
+        checkedMediaRefs.add(decoded);
+        const match = /^kb:([\p{L}\p{N}-]+)\/(.+)$/u.exec(decoded);
+        if (!match) continue;
+        const [, , relative] = match;
+        if (
+          !/^files\/(?:[\p{L}\p{N}_.() -]+\/)*[\p{L}\p{N}_.() -]+$/u.test(
+            relative,
+          ) ||
+          relative.split("/").some((part) => part === "." || part === "..")
+        ) {
+          kbMediaFileErrors.set(decoded, `KB 图片路径无效：${relative}`);
+          continue;
+        }
+        try {
+          const candidate = path.resolve(physicalVaultRoot, relative);
+          const stat = await lstat(candidate);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
+            kbMediaFileErrors.set(decoded, `KB 原图缺失、为空或不是普通文件：${relative}`);
+            continue;
+          }
+          const physical = await realpath(candidate);
+          if (!inside(physicalVaultRoot, physical)) {
+            kbMediaFileErrors.set(decoded, `KB 图片路径越出知识库目录：${relative}`);
+            continue;
+          }
+          await host.readBytes(physical);
+        } catch {
+          kbMediaFileErrors.set(decoded, `KB 原图文件缺失或不可读：${relative}`);
+        }
+      }
     } catch (error) {
       knowledgeError = error instanceof Error ? error.message : String(error);
       if (strict)
@@ -669,6 +712,7 @@ async function loadFactContext(
     ...(identity ? { identity } : {}),
     ...(knowledgeError ? { knowledgeError } : {}),
     quoteErrors,
+    kbMediaFileErrors,
     kbRecords,
     kbRecordHasFiles,
     kbMaterials,
@@ -1001,6 +1045,7 @@ function verifiedSources(
   context: FactContext,
   knowledgeError?: string,
   quoteErrors: ReadonlyMap<string, string> = new Map(),
+  kbMediaFileErrors: ReadonlyMap<string, string> = new Map(),
 ): FactCheckState[] {
   if (!Array.isArray(fills)) return [];
   return fills.flatMap((item) => {
@@ -1064,6 +1109,8 @@ function verifiedSources(
           if (record) {
             if (!asStringList(record.fields.files).includes(match[2]))
               throw new Error("KB 图片已从证据记录中移除");
+            const mediaFileError = kbMediaFileErrors.get(decoded);
+            if (mediaFileError) throw new Error(mediaFileError);
             current = {
               ...recordFactSource(record, source.reference, declaredHolder, ""),
               media: true,
@@ -1072,6 +1119,8 @@ function verifiedSources(
           } else {
             if (!asStringList(material!.fields.files).includes(match[2]))
               throw new Error("KB 图片已从写作素材中移除");
+            const mediaFileError = kbMediaFileErrors.get(decoded);
+            if (mediaFileError) throw new Error(mediaFileError);
             current = {
               reference: source.reference,
               resolvedValue: "",
@@ -1278,6 +1327,7 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     loaded.context,
     loaded.knowledgeError,
     loaded.quoteErrors,
+    loaded.kbMediaFileErrors,
   );
   const volumes = [];
   for (const name of project.drafts) {

@@ -796,11 +796,14 @@ export function reconcileOutlineServerPayload(input: {
     incoming.outline.kind === "value"
       ? canonicalOutlineDigest(incoming.outline.outline)
       : null;
+  const bothMissingOnServer =
+    current.baselineOutline === null && incoming.outline.kind === "missing";
   const outlineUnchangedOnServer =
     !serverMutatedOutline &&
-    prevBaseDigest !== null &&
-    incomingDigest !== null &&
-    prevBaseDigest === incomingDigest;
+    (bothMissingOnServer ||
+      (prevBaseDigest !== null &&
+        incomingDigest !== null &&
+        prevBaseDigest === incomingDigest));
   if (outlineUnchangedOnServer) {
     return {
       action: "keep_draft_advance_rev",
@@ -816,6 +819,35 @@ export function reconcileOutlineServerPayload(input: {
       ...current,
       conflictError: conflictMessage,
     },
+  };
+}
+
+/**
+ * Apply a local edit transition atomically against the latest draft and undo stack,
+ * ensuring async callbacks (such as upload completion) push the true pre-binding draft
+ * onto undoStack rather than a stale closure snapshot.
+ */
+export function applyOutlineDraftEdit(
+  state: Pick<
+    OutlineEditorSaveState,
+    "draftOutline" | "undoStack" | "redoStack" | "conflictError" | "confirmMissing"
+  >,
+  nextOrUpdater: OutlineDocument | ((live: OutlineDocument) => OutlineDocument),
+): Pick<
+  OutlineEditorSaveState,
+  "draftOutline" | "undoStack" | "redoStack" | "conflictError" | "confirmMissing"
+> {
+  if (!state.draftOutline) return state;
+  const next =
+    typeof nextOrUpdater === "function"
+      ? nextOrUpdater(state.draftOutline)
+      : nextOrUpdater;
+  return {
+    draftOutline: next,
+    undoStack: [...state.undoStack.slice(-49), state.draftOutline],
+    redoStack: [],
+    conflictError: "",
+    confirmMissing: false,
   };
 }
 
