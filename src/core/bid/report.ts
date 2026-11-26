@@ -15,6 +15,7 @@ export const CHECK_CODES = [
   "C14",
   "C15",
   "C16",
+  "C17",
 ] as const;
 export type CheckCode = (typeof CHECK_CODES)[number];
 export type CheckResults = Record<CheckCode, unknown[]>;

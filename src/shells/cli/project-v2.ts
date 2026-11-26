@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import type { HostPort } from "../../core/host.js";
 import {
@@ -7,6 +7,7 @@ import {
   prepareExtractedDraft,
   readProject,
   type BidLedger,
+  type WorkflowMode,
 } from "../../core/bid/project.js";
 import {
   editBidDraft,
@@ -22,7 +23,7 @@ import { isCurrentAuthorization } from "../../core/bid/authorization.js";
 import { pendingFingerprint } from "../../core/bid/pending-fingerprint.js";
 import type { CoverageMark } from "../../core/bid/human-review.js";
 import {
-  incidentFingerprint,
+  hasUnresolvedLedgerIncident,
   resolveLedger,
   sealLedger,
 } from "../../core/bid/ledger-integrity.js";
@@ -75,6 +76,24 @@ import {
   type Requirement,
   type RequirementsState,
 } from "../../core/bid/requirements.js";
+import {
+  assertLockedTemplateTransitions,
+  canonicalOutlineDigest,
+  checkOutlineConsistency,
+  evaluateOutlineConfirmation,
+  isSafeMaterialPath,
+  parseOutline,
+  patchOutline,
+  validateOutlineInput,
+  type OutlineDocument,
+  type OutlineKbMediaState,
+  type OutlineMaterialState,
+  type OutlineState,
+} from "../../core/bid/outline.js";
+import {
+  buildOutlineView,
+  type OutlineKbRecordSummary,
+} from "../../workbench/outline.js";
 import { assertOutputIsolation } from "../output-isolation.js";
 import { serializedProject } from "./project-operations.js";
 
@@ -92,6 +111,261 @@ function volume(value: string): string {
       "分册名称包含非法字符；请使用 1–100 位字母、数字、空格、下划线或连字符。",
     );
   return value;
+}
+
+export async function readOutlineState(root: string): Promise<OutlineState> {
+  const target = path.join(root, "outline.json");
+  try {
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      return {
+        kind: "error",
+        reason: "outline.json 不是项目内的普通文件",
+      };
+    }
+    const physical = await realpath(target);
+    if (physical !== path.join(await realpath(root), "outline.json")) {
+      return {
+        kind: "error",
+        reason: "outline.json 路径越界",
+      };
+    }
+    const bytes = await readFile(physical);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return parseOutline(text);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { kind: "missing" };
+    }
+    return {
+      kind: "error",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function listProjectMaterials(root: string): Promise<string[]> {
+  const physicalRoot = await realpath(root);
+  const materialsRoot = path.join(physicalRoot, "materials");
+  try {
+    const rootStat = await lstat(materialsRoot);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return [];
+    const physicalMaterials = await realpath(materialsRoot);
+    if (physicalMaterials !== materialsRoot) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  const collected: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const stat = await lstat(full);
+      if (stat.isSymbolicLink()) continue;
+      const physical = await realpath(full);
+      if (!inside(materialsRoot, physical)) continue;
+      if (stat.isDirectory()) {
+        await walk(physical);
+      } else if (stat.isFile()) {
+        const rel = path.relative(physicalRoot, physical).split(path.sep).join("/");
+        collected.push(rel);
+      }
+    }
+  };
+  await walk(materialsRoot);
+  return collected.sort();
+}
+
+const OUTLINE_IMAGE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".webp",
+  ".svg",
+  ".avif",
+  ".heic",
+  ".wmf",
+  ".emf",
+]);
+
+async function resolveOutlineMaterialStates(
+  host: HostPort,
+  root: string,
+  outline: OutlineDocument,
+): Promise<Map<string, OutlineMaterialState>> {
+  const states = new Map<string, OutlineMaterialState>();
+  const physicalRoot = await realpath(root);
+
+  const checkMaterialFile = async (relative: string): Promise<string | null> => {
+    if (!isSafeMaterialPath(relative)) return null;
+    try {
+      const full = path.resolve(physicalRoot, relative);
+      const stat = await lstat(full);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+      const physical = await realpath(full);
+      if (!inside(path.join(physicalRoot, "materials"), physical)) return null;
+      return physical;
+    } catch {
+      return null;
+    }
+  };
+
+  for (const node of outline.nodes) {
+    for (const binding of node.evidence ?? []) {
+      if (binding.source !== "material") continue;
+      if (states.has(binding.ref) && !binding.renderedPages?.length) continue;
+
+      const refPhysical = await checkMaterialFile(binding.ref);
+      if (!refPhysical) {
+        states.set(binding.ref, {
+          exists: false,
+          readable: false,
+          kind: "other",
+          error: `绑定的材料文件不存在或不可读：${binding.ref}`,
+        });
+        continue;
+      }
+
+      const ext = path.extname(binding.ref).toLocaleLowerCase("en-US");
+      if (binding.renderedPages && binding.renderedPages.length > 0) {
+        const missingPages: string[] = [];
+        const expectedImageHashes: string[] = [];
+        for (const page of binding.renderedPages) {
+          const pagePhysical = await checkMaterialFile(page);
+          if (!pagePhysical) {
+            missingPages.push(page);
+            continue;
+          }
+          try {
+            const rawBytes = await readFile(pagePhysical);
+            const normalized = host.normalizeImage
+              ? await host.normalizeImage(rawBytes, page)
+              : rawBytes;
+            expectedImageHashes.push(sha256Hex(normalized));
+          } catch {
+            missingPages.push(page);
+          }
+        }
+        states.set(binding.ref, {
+          exists: true,
+          readable: missingPages.length === 0,
+          kind: ext === ".pdf" ? "pdf" : "image",
+          expectedImageHashes,
+          ...(missingPages.length > 0 ? { missingPages } : {}),
+        });
+        continue;
+      }
+
+      if (OUTLINE_IMAGE_EXTENSIONS.has(ext)) {
+        try {
+          const rawBytes = await readFile(refPhysical);
+          const normalized = host.normalizeImage
+            ? await host.normalizeImage(rawBytes, binding.ref)
+            : rawBytes;
+          states.set(binding.ref, {
+            exists: true,
+            readable: true,
+            kind: "image",
+            expectedImageHashes: [sha256Hex(normalized)],
+          });
+        } catch (error) {
+          states.set(binding.ref, {
+            exists: true,
+            readable: false,
+            kind: "image",
+            error: `材料图片无法解码（${binding.ref}）：${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+        continue;
+      }
+
+      if (ext === ".pdf") {
+        try {
+          await readFile(refPhysical);
+          states.set(binding.ref, {
+            exists: true,
+            readable: true,
+            kind: "pdf",
+            expectedImageHashes: [],
+          });
+        } catch (error) {
+          states.set(binding.ref, {
+            exists: true,
+            readable: false,
+            kind: "pdf",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
+
+      if (ext === ".docx") {
+        try {
+          await readFile(refPhysical);
+          states.set(binding.ref, {
+            exists: true,
+            readable: true,
+            kind: "docx",
+            expectedImageHashes: [],
+          });
+        } catch (error) {
+          states.set(binding.ref, {
+            exists: true,
+            readable: false,
+            kind: "docx",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
+
+      if (ext === ".txt" || ext === ".md") {
+        try {
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            await readFile(refPhysical),
+          );
+          states.set(binding.ref, {
+            exists: true,
+            readable: true,
+            kind: "text",
+            expectedImageHashes: [],
+          });
+        } catch (error) {
+          states.set(binding.ref, {
+            exists: true,
+            readable: false,
+            kind: "text",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
+
+      try {
+        await readFile(refPhysical);
+        states.set(binding.ref, {
+          exists: true,
+          readable: true,
+          kind: "other",
+          expectedImageHashes: [],
+        });
+      } catch (error) {
+        states.set(binding.ref, {
+          exists: true,
+          readable: false,
+          kind: "other",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return states;
 }
 
 async function readRequirementsState(root: string): Promise<RequirementsState> {
@@ -248,10 +522,14 @@ async function loadFactContext(
   };
   knowledgeError?: string;
   quoteErrors: Map<string, string>;
+  kbRecords: OutlineKbRecordSummary[];
+  kbRecordHasFiles: Map<string, boolean>;
 }> {
   const records = new Map<string, FactRecord>(),
     quotes = new Map<string, string>(),
-    quoteErrors = new Map<string, string>();
+    quoteErrors = new Map<string, string>(),
+    kbRecords: OutlineKbRecordSummary[] = [],
+    kbRecordHasFiles = new Map<string, boolean>();
   let subject: KbEntry | undefined,
     identity:
       | {
@@ -271,7 +549,25 @@ async function loadFactContext(
           kb.health(project.vaultId, project.deadline),
         ]);
       subject = currentSubject;
-      for (const record of health.records) records.set(record.id, record);
+      for (const record of health.records) {
+        records.set(record.id, record);
+        const files = asStringList(record.fields.files);
+        const hasFiles = files.length > 0;
+        kbRecordHasFiles.set(record.id, hasFiles);
+        kbRecords.push({
+          id: record.id,
+          ...(typeof record.fields.title === "string"
+            ? { title: record.fields.title }
+            : {}),
+          ...(typeof record.fields.type === "string"
+            ? { type: record.fields.type }
+            : {}),
+          verified: record.verified,
+          validity: record.validity,
+          subject: record.subject,
+          hasFiles,
+        });
+      }
       const citedIds = new Set(
         references.flatMap(
           (reference) =>
@@ -325,6 +621,8 @@ async function loadFactContext(
     ...(identity ? { identity } : {}),
     ...(knowledgeError ? { knowledgeError } : {}),
     quoteErrors,
+    kbRecords,
+    kbRecordHasFiles,
   };
 }
 
@@ -763,6 +1061,126 @@ async function anchorAt(
   }
 }
 
+async function resolveOutlineKbMediaStates(
+  host: HostPort,
+  vaultId: string | null,
+  outline: OutlineDocument,
+  records: ReadonlyMap<string, FactRecord>,
+): Promise<Map<string, OutlineKbMediaState>> {
+  const result = new Map<string, OutlineKbMediaState>();
+  const boundIds = new Set<string>();
+  for (const node of outline.nodes) {
+    for (const binding of node.evidence ?? []) {
+      if (binding.source === "kb") boundIds.add(binding.ref);
+    }
+  }
+  if (boundIds.size === 0) return result;
+  if (!vaultId) {
+    for (const recordId of boundIds) {
+      result.set(recordId, { kind: "error", reason: "项目未关联知识库" });
+    }
+    return result;
+  }
+
+  const kbRoot = knowledgeBasesRoot();
+  const kb = new KnowledgeBase(host, kbRoot);
+  const vaultRoot = kb.vaultRoot(vaultId);
+  let physicalVaultRoot: string;
+  try {
+    physicalVaultRoot = await realpath(vaultRoot);
+  } catch (error) {
+    const reason =
+      error instanceof Error ? error.message : "关联知识库目录不可读";
+    for (const recordId of boundIds) {
+      result.set(recordId, { kind: "error", reason });
+    }
+    return result;
+  }
+
+  for (const recordId of boundIds) {
+    const record = records.get(recordId);
+    if (!record) {
+      result.set(recordId, {
+        kind: "error",
+        reason: "知识库记录不存在或不可读",
+      });
+      continue;
+    }
+    const files = asStringList(record.fields.files);
+    if (files.length === 0) {
+      result.set(recordId, { kind: "no_images" });
+      continue;
+    }
+    const hashes: string[] = [];
+    let imageCandidateCount = 0;
+    let lastError: string | null = null;
+    for (const relative of files) {
+      if (
+        !/^files\/(?:[\p{L}\p{N}_.() -]+\/)*[\p{L}\p{N}_.() -]+$/u.test(
+          relative,
+        ) ||
+        relative.split("/").some((part) => part === "." || part === "..")
+      ) {
+        lastError = `附件路径无效：${relative}`;
+        continue;
+      }
+      const extension = path.extname(relative).toLocaleLowerCase("en-US");
+      if (
+        ![
+          ".png",
+          ".jpg",
+          ".jpeg",
+          ".gif",
+          ".bmp",
+          ".tif",
+          ".tiff",
+          ".webp",
+        ].includes(extension)
+      ) {
+        continue;
+      }
+      imageCandidateCount++;
+      try {
+        const candidate = path.resolve(physicalVaultRoot, relative);
+        const stat = await lstat(candidate);
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+          lastError = `附件不是普通文件：${relative}`;
+          continue;
+        }
+        const physical = await realpath(candidate);
+        if (!inside(physicalVaultRoot, physical)) {
+          lastError = `附件路径越界：${relative}`;
+          continue;
+        }
+        const stored = await host.readBytes(physical);
+        const normalized = host.normalizeImage
+          ? await host.normalizeImage(stored, relative)
+          : stored;
+        hashes.push(sha256Hex(normalized));
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error.message : `附件读取失败：${relative}`;
+      }
+    }
+    if (lastError) {
+      result.set(recordId, {
+        kind: "error",
+        reason: lastError,
+      });
+    } else if (hashes.length > 0) {
+      result.set(recordId, { kind: "ok", hashes });
+    } else if (imageCandidateCount === 0) {
+      result.set(recordId, { kind: "no_images" });
+    } else {
+      result.set(recordId, {
+        kind: "error",
+        reason: "知识库证照图片不可读或已损坏",
+      });
+    }
+  }
+  return result;
+}
+
 export async function readProjectSnapshot(host: HostPort, root: string) {
   const project = await readProject(host, root),
     rawLedger = await ledgerAt(root);
@@ -786,6 +1204,8 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     volumes.push({ name, file, draft, base });
   }
   const requirements = await readRequirementsState(root);
+  const outline = await readOutlineState(root);
+  const materials = await listProjectMaterials(root);
   const sources = await registeredTenderSources(root, project, ledger);
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const reviewContext = {
@@ -793,6 +1213,47 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     vaultId: project.vaultId,
     deadline: project.deadline,
   };
+  const outlineConfirmation = await evaluateOutlineConfirmation({
+    outlineState: outline,
+    confirmation: ledger.outlineConfirmation,
+    root,
+    secret,
+    context: reviewContext,
+  });
+  const materialStates =
+    outline.kind === "value"
+      ? await resolveOutlineMaterialStates(host, root, outline.outline)
+      : new Map<string, OutlineMaterialState>();
+  const kbRecordMediaStates =
+    outline.kind === "value"
+      ? await resolveOutlineKbMediaStates(
+          host,
+          project.vaultId,
+          outline.outline,
+          loaded.context.records,
+        )
+      : new Map<string, OutlineKbMediaState>();
+  const outlineResults = await checkOutlineConsistency({
+    outlineState: outline,
+    confirmationStatus: outlineConfirmation.status,
+    workflowMode: project.workflowMode,
+    drafts: new Map(volumes.map((item) => [item.name, item.draft])),
+    ledger,
+    kbRecordHasFiles: loaded.kbRecordHasFiles,
+    kbRecordMediaStates,
+    materialStates,
+  });
+  const outlineView = buildOutlineView({
+    outlineState: outline,
+    confirmationStatus: outlineConfirmation.status,
+    confirmedAt: outlineConfirmation.valid
+      ? (ledger.outlineConfirmation?.confirmedAt ?? null)
+      : null,
+    requirements,
+    kbRecords: loaded.kbRecords,
+    materials,
+    c17Issues: outlineResults,
+  });
   const validCoverageMarks: CoverageMark[] = [];
   const expiredCoverageIds = new Set<string>();
   for (const volumeItem of volumes) {
@@ -821,8 +1282,14 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     new Map(volumes.map((item) => [item.name, item.draft])),
     coveredIds,
   );
+  const volumeNames = new Set(volumes.map((item) => item.name));
   const reports: DraftCheckReport[] = [];
   for (const [index, item] of volumes.entries()) {
+    const c17ForVolume = outlineResults.filter(
+      (issue) =>
+        issue.draft === item.name ||
+        (index === 0 && (!issue.draft || !volumeNames.has(issue.draft))),
+    );
     reports.push(
       await checkDraft(host, {
         name: item.name,
@@ -837,6 +1304,12 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
         requirementsState: requirements,
         knownDrafts: project.drafts,
         includeOrphanCoverage: index === 0,
+        outline: {
+          C17: c17ForVolume,
+          ...(index === 0 && outlineConfirmation.invalidAuthorization
+            ? { invalidAuthorization: outlineConfirmation.invalidAuthorization }
+            : {}),
+        },
         ...(loaded.identity ? { identity: loaded.identity } : {}),
         ...(project.vaultId && loaded.knowledgeError
           ? { identityError: "关联知识库无法读取，C09 主体检查未知" }
@@ -857,12 +1330,22 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
       knownDrafts: project.drafts,
       includeOrphanCoverage: true,
     });
+    const unresolvedIncident = await hasUnresolvedLedgerIncident(
+      ledger,
+      root,
+      secret,
+    );
     summary.counts.C12 = requirementResults.C12.length;
     summary.blockingCounts.C12 = requirementResults.C12.length;
     summary.counts.C14 = requirementResults.C14.length;
     summary.blockingCounts.C14 = requirementResults.C14.length;
-    summary.counts.C15 = orphanCoverage.invalidAuthorizations.length;
-    summary.blockingCounts.C15 = orphanCoverage.invalidAuthorizations.length;
+    summary.counts.C15 =
+      orphanCoverage.invalidAuthorizations.length +
+      (outlineConfirmation.invalidAuthorization ? 1 : 0) +
+      (unresolvedIncident ? 1 : 0);
+    summary.blockingCounts.C15 = summary.counts.C15;
+    summary.counts.C17 = outlineResults.length;
+    summary.blockingCounts.C17 = outlineResults.length;
   }
   const revision = sha256Hex(
     JSON.stringify([
@@ -870,6 +1353,8 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
       ledger,
       anchor.value,
       requirements,
+      outline,
+      materials,
       facts,
       loaded.identity,
       volumes.map((item) => [
@@ -888,6 +1373,12 @@ export async function readProjectSnapshot(host: HostPort, root: string) {
     reports,
     requirements,
     requirementResults,
+    outline,
+    outlineConfirmation,
+    outlineResults,
+    outlineSummary: outlineView.summary,
+    materials,
+    kbRecords: loaded.kbRecords,
     coverageSummary: {
       validMarks: validCoverageMarks,
       expiredIds: [...expiredCoverageIds],
@@ -978,22 +1469,11 @@ async function lightweightDraftPending(input: {
     anchorValue,
   } = input;
   const ledger = await resolveLedger(rawLedger, root, secret, anchorValue);
-  const incident = ledger.integrityIncident;
-  if (incident && incident.recoveryNeeded) {
-    const resolution = incident.resolution as
-      | { note?: unknown; authorization?: unknown }
-      | undefined;
-    const note = typeof resolution?.note === "string" ? resolution.note : "";
-    const valid =
-      !!secret &&
-      !!note.trim() &&
-      (await isCurrentAuthorization(secret, resolution?.authorization, {
-        kind: "recover",
-        project: root,
-        item: "ledger",
-        fingerprint: incidentFingerprint(incident, note),
-      }));
-    if (!valid) throw new Error("台账无法核验，待定项状态未知");
+  if (
+    ledger.integrityIncident?.recoveryNeeded &&
+    (await hasUnresolvedLedgerIncident(ledger, root, secret))
+  ) {
+    throw new Error("台账无法核验，待定项状态未知");
   }
 
   let baselineWarning: string | undefined;
@@ -1311,6 +1791,45 @@ async function writeRequirementsFile(
   ]);
 }
 
+export async function writeOutlineFile(
+  host: HostPort,
+  root: string,
+  project: Awaited<ReturnType<typeof readProject>>,
+  outline: OutlineDocument,
+): Promise<void> {
+  const serialized = JSON.stringify(outline, null, 2);
+  if (parseOutline(serialized).kind !== "value") {
+    throw new Error("编制大纲序列化校验失败");
+  }
+  const previousState = await readOutlineState(root);
+  if (previousState.kind === "value") {
+    assertLockedTemplateTransitions(previousState.outline, outline);
+  }
+  if (!host.writeFiles) throw new Error("宿主不支持原子文件批次");
+  const target = path.join(root, "outline.json");
+  assertOutputIsolation(
+    { files: [target] },
+    {
+      files: project.tenders.map((item) => path.resolve(root, item.copy)),
+      directories: [path.join(root, "tender"), path.join(root, "draft")],
+    },
+  );
+  try {
+    const stat = await lstat(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("outline.json 不是项目内的普通文件");
+    }
+    if ((await realpath(target)) !== target) {
+      throw new Error("outline.json 路径越界");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await host.writeFiles([
+    { path: target, data: new TextEncoder().encode(serialized) },
+  ]);
+}
+
 export async function runProject(
   host: HostPort,
   args: string[],
@@ -1334,10 +1853,14 @@ export async function runProjectUnlocked(
         ? [path.resolve(args[index + 1])]
         : [],
     );
+    const workflowMode = args.includes("--workflow-mode")
+      ? (flag(args, "workflow-mode") as WorkflowMode)
+      : undefined;
     const project = await initializeProject(host, root, {
       name: flag(args, "name"),
       deadline: flag(args, "deadline"),
       ...(args.includes("--vault") ? { vaultId: flag(args, "vault") } : {}),
+      ...(workflowMode !== undefined ? { workflowMode } : {}),
       tenders,
       createdAt: new Date().toISOString(),
     });
@@ -1502,12 +2025,18 @@ export async function runProjectUnlocked(
     };
     if (name) return { ...volumes[0], ...summary };
     return volumes.length === 0 &&
-      (snapshot.counts.C12 > 0 || snapshot.counts.C14 > 0)
+      (snapshot.counts.C12 > 0 ||
+        snapshot.counts.C14 > 0 ||
+        snapshot.counts.C15 > 0 ||
+        snapshot.counts.C17 > 0)
       ? {
           ...summary,
           counts: snapshot.counts,
           volumes,
           requirements: snapshot.requirementResults,
+          ...(snapshot.outlineResults.length > 0
+            ? { outline: snapshot.outlineResults }
+            : {}),
         }
       : { ...summary, counts: snapshot.counts, volumes };
   }
@@ -1646,6 +2175,217 @@ export async function runProjectUnlocked(
       count: validated.items.length,
       mustRespondCount: validated.items.filter((item) => item.mustRespond)
         .length,
+    };
+  }
+  if (action === "outline") {
+    for (const forbiddenFlag of [
+      "--confirm",
+      "--confirmed",
+      "--confirmed-at",
+      "--authorization",
+      "--approved",
+      "--verified",
+      "--verified-fields",
+    ]) {
+      if (args.includes(forbiddenFlag)) {
+        throw new Error(
+          `outline 命令禁止设置确认或核实参数（${forbiddenFlag}）；确认大纲仅限工作台人工操作。`,
+        );
+      }
+    }
+    const subAction = flag(args, "action");
+    if (subAction !== "get" && subAction !== "save" && subAction !== "patch") {
+      throw new Error(
+        "outline action 必须为 get、save 或 patch；确认大纲仅限工作台人工操作。",
+      );
+    }
+    const parseJsonFlag = (name: string): unknown => {
+      const raw = flag(args, name);
+      try {
+        return JSON.parse(raw);
+      } catch {
+        throw new Error(`--${name} 必须是合法 JSON`);
+      }
+    };
+    const loadViewContext = async () => {
+      const secret = (await host.authorizationKey?.(false)) ?? null;
+      const anchor = await anchorAt(host, root, false);
+      const ledger = await resolveLedger(
+        await ledgerAt(root),
+        root,
+        secret,
+        anchor.value,
+      );
+      const requirements = await readRequirementsState(root);
+      const loaded = await loadFactContext(host, root, project, [], false);
+      const materials = await listProjectMaterials(root);
+      return { secret, ledger, requirements, loaded, materials };
+    };
+
+    if (subAction === "get") {
+      for (const disallowed of [
+        "--volumes",
+        "--nodes",
+        "--upsert-nodes",
+        "--remove-node-ids",
+        "--update-volumes",
+      ]) {
+        if (args.includes(disallowed)) {
+          throw new Error(`outline get 为只读，不接受 ${disallowed}`);
+        }
+      }
+      const outlineState = await readOutlineState(root);
+      const { secret, ledger, requirements, loaded, materials } =
+        await loadViewContext();
+      const confirmation = await evaluateOutlineConfirmation({
+        outlineState,
+        confirmation: ledger.outlineConfirmation,
+        root,
+        secret,
+        context: {
+          vaultId: project.vaultId,
+          deadline: project.deadline,
+        },
+      });
+      const view = buildOutlineView({
+        outlineState,
+        confirmationStatus: confirmation.status,
+        confirmedAt: confirmation.valid
+          ? (ledger.outlineConfirmation?.confirmedAt ?? null)
+          : null,
+        requirements,
+        kbRecords: loaded.kbRecords,
+        materials,
+      });
+      return {
+        kind: outlineState.kind,
+        ...(outlineState.kind === "error"
+          ? { reason: outlineState.reason }
+          : {}),
+        ...(outlineState.kind === "value"
+          ? { outline: outlineState.outline }
+          : {}),
+        confirmationStatus: confirmation.status,
+        valid: confirmation.valid,
+        summary: view.summary,
+        uncoveredRequirementList: view.uncoveredRequirementList,
+        materials,
+      };
+    }
+
+    if (subAction === "save") {
+      for (const disallowed of [
+        "--upsert-nodes",
+        "--remove-node-ids",
+        "--update-volumes",
+      ]) {
+        if (args.includes(disallowed)) {
+          throw new Error(`outline save 不接受 ${disallowed}；增量更新请改用 action=patch`);
+        }
+      }
+      const volumes = parseJsonFlag("volumes");
+      const nodes = parseJsonFlag("nodes");
+      const candidate = {
+        format: "seal-outline-1",
+        volumes,
+        nodes,
+        updatedAt: new Date().toISOString(),
+        updatedBy: "agent",
+      };
+      const validated = validateOutlineInput(candidate);
+      if (!validated.outline) {
+        throw new Error(
+          JSON.stringify({
+            saved: false,
+            reason: `编制大纲校验失败（${validated.errors.length} 项错误），未写入`,
+            errors: validated.errors,
+          }),
+        );
+      }
+      await writeOutlineFile(host, root, project, validated.outline);
+      const { requirements, loaded, materials } = await loadViewContext();
+      const view = buildOutlineView({
+        outlineState: { kind: "value", outline: validated.outline },
+        confirmationStatus: "unconfirmed",
+        requirements,
+        kbRecords: loaded.kbRecords,
+        materials,
+      });
+      return {
+        saved: true,
+        format: "seal-outline-1",
+        digest: canonicalOutlineDigest(validated.outline),
+        summary: view.summary,
+      };
+    }
+
+    for (const disallowed of ["--volumes", "--nodes"]) {
+      if (args.includes(disallowed)) {
+        throw new Error(`outline patch 不接受 ${disallowed}；全量保存请改用 action=save`);
+      }
+    }
+    const outlineState = await readOutlineState(root);
+    if (outlineState.kind === "missing") {
+      throw new Error(
+        JSON.stringify({
+          patched: false,
+          reason: "outline.json 尚不存在；请先用 action=\"save\" 保存初始编制大纲。",
+        }),
+      );
+    }
+    if (outlineState.kind === "error") {
+      throw new Error(
+        JSON.stringify({
+          patched: false,
+          reason: `outline.json 损坏或无法读取：${outlineState.reason}；请先用 action="save" 重建。`,
+        }),
+      );
+    }
+    const upsertNodes = args.includes("--upsert-nodes")
+      ? parseJsonFlag("upsert-nodes")
+      : undefined;
+    const removeNodeIds = args.includes("--remove-node-ids")
+      ? parseJsonFlag("remove-node-ids")
+      : undefined;
+    const updateVolumes = args.includes("--update-volumes")
+      ? parseJsonFlag("update-volumes")
+      : undefined;
+    if (
+      upsertNodes === undefined &&
+      removeNodeIds === undefined &&
+      updateVolumes === undefined
+    ) {
+      throw new Error(
+        "outline patch 至少需提供 --upsert-nodes、--remove-node-ids 或 --update-volumes 之一",
+      );
+    }
+    const nextOutline = patchOutline(outlineState.outline, {
+      ...(upsertNodes !== undefined
+        ? { upsertNodes: upsertNodes as OutlineDocument["nodes"] }
+        : {}),
+      ...(removeNodeIds !== undefined
+        ? { removeNodeIds: removeNodeIds as string[] }
+        : {}),
+      ...(updateVolumes !== undefined
+        ? { updateVolumes: updateVolumes as OutlineDocument["volumes"] }
+        : {}),
+      updatedAt: new Date().toISOString(),
+      updatedBy: "agent",
+    });
+    await writeOutlineFile(host, root, project, nextOutline);
+    const { requirements, loaded, materials } = await loadViewContext();
+    const view = buildOutlineView({
+      outlineState: { kind: "value", outline: nextOutline },
+      confirmationStatus: "unconfirmed",
+      requirements,
+      kbRecords: loaded.kbRecords,
+      materials,
+    });
+    return {
+      patched: true,
+      format: "seal-outline-1",
+      digest: canonicalOutlineDigest(nextOutline),
+      summary: view.summary,
     };
   }
   const name = volume(flag(args, "draft"));
@@ -1810,6 +2550,6 @@ export async function runProjectUnlocked(
     };
   }
   throw new Error(
-    "支持的 project 命令：init、read、extract、edit、check、requirements",
+    "支持的 project 命令：init、read、extract、edit、check、requirements、outline",
   );
 }

@@ -27,6 +27,41 @@ import {
   shouldShowReferenceDateHint,
   unverifiedBadgeTone,
 } from "../../workbench/knowledge.js";
+import {
+  addOutlineNode,
+  canonicalOutlineDigest,
+  deleteOutlineNode,
+  indentOutlineNode,
+  moveOutlineNode,
+  outdentOutlineNode,
+  updateOutlineNode,
+  type OutlineConfirmationStatus,
+  type OutlineDocument,
+  type OutlineEvidenceBinding,
+  type OutlineNode,
+  type OutlineNodeKind,
+  type OutlineState,
+} from "../../core/bid/outline.js";
+import type { RequirementsState } from "../../core/bid/requirements.js";
+import {
+  bindEvidenceToNode,
+  buildOutlineRevisionPrompt,
+  buildOutlineView,
+  canDeleteOutlineNode,
+  canIndentOutlineNode,
+  canMoveOutlineNode,
+  canOutdentOutlineNode,
+  createOutlineNodeId,
+  filterOutlineRows,
+  outlineFilterCounts,
+  reconcileOutlineSaveResult,
+  runOutlineConfirmFlow,
+  unbindEvidenceFromNode,
+  type OutlineKbRecordSummary,
+  type OutlineRowFilter,
+  type OutlineRowView,
+  type OutlineViewModel,
+} from "../../workbench/outline.js";
 
 declare const __SEAL_VERSION__: string;
 declare const __SEAL_PACKAGE_NAME__: string;
@@ -49,6 +84,36 @@ type AsyncState<T> =
   | { kind: "loading" }
   | { kind: "error"; error: string }
   | { kind: "value"; value: T };
+type OutlineSummaryOverview = {
+  kind: "missing" | "error" | "value";
+  reason?: string;
+  confirmationStatus: OutlineConfirmationStatus;
+  confirmedAt: string | null;
+  totalNodes: number;
+  includedNodes: number;
+  excludedNodes: number;
+  missingMaterials: number;
+  needsReviewMaterials: number;
+  uncoveredRequirements: number;
+  c17Gaps: number;
+  volumeCount: number;
+  changesCount?: number;
+};
+type OutlineGetResponse =
+  | { kind: "not_project" }
+  | {
+      projectKind: "project";
+      projectId: string;
+      project: ReviewState["project"];
+      vaultName: string | null;
+      revision: string;
+      binding: { sessionId?: string; workspaceId?: string } | null;
+      outline: OutlineState;
+      view: OutlineViewModel;
+      kbRecords: OutlineKbRecordSummary[];
+      materials: string[];
+      requirements: RequirementsState;
+    };
 type ReviewState = {
   kind: "project" | "not_project";
   projectId: string;
@@ -56,6 +121,7 @@ type ReviewState = {
     name: string;
     vaultId: string | null;
     deadline: string;
+    workflowMode?: "outline_first" | "direct";
     drafts: string[];
     tenders?: Array<{ copy: string }>;
   };
@@ -63,6 +129,7 @@ type ReviewState = {
   revision: string;
   ready: boolean;
   blockingCounts: Record<string, number>;
+  outlineSummary?: OutlineSummaryOverview;
   limitations: string[];
   groups: Array<{
     id: string;
@@ -83,6 +150,7 @@ interface Overview {
     project?: ReviewState["project"];
     vaultName?: string | null;
     counts?: Record<string, number>;
+    outlineSummary?: OutlineSummaryOverview;
     binding?: { sessionId?: string; workspaceId?: string };
     error?: string;
   }>;
@@ -140,6 +208,8 @@ currentWindow.__ModuleLoader__.load({
         ctx.effect(() => ctx.locale.register(NS, { zh, en }));
         const t = ctx.locale.bind(NS) as (key: DictionaryKey) => string;
         const hasStoredEdits = (prefix = "seal:buffers:") =>
+          (prefix === "seal:buffers:" &&
+            sessionStorage.getItem("seal:outline-dirty") === "1") ||
           Object.keys(sessionStorage)
             .filter((key) => key.startsWith(prefix))
             .some((key) => {
@@ -152,6 +222,71 @@ currentWindow.__ModuleLoader__.load({
         const navigate = (operation: () => void) => {
           if (!hasStoredEdits() || window.confirm(t("leave"))) operation();
         };
+        const openGlobalOutlineEditor = (
+          projectId: string,
+          focusNodeId?: string,
+        ) => {
+          try {
+            sessionStorage.setItem("seal:outline-project-id", projectId);
+            sessionStorage.setItem("seal:global-tab", "outline");
+            if (focusNodeId) {
+              sessionStorage.setItem("seal:outline-focus-node", focusNodeId);
+            } else {
+              sessionStorage.removeItem("seal:outline-focus-node");
+            }
+          } catch {
+            /* Ignore storage errors. */
+          }
+          window.dispatchEvent(
+            new CustomEvent("seal:open-outline", {
+              detail: { projectId, focusNodeId },
+            }),
+          );
+          ctx.layout.selectPanel(PANEL_ID);
+        };
+        function outlineStatusMeta(summary?: OutlineSummaryOverview) {
+          if (!summary || summary.kind === "missing") {
+            return {
+              label: t("outlineStatusMissing"),
+              className: "seal-badge",
+            };
+          }
+          if (summary.kind === "error") {
+            return {
+              label: t("outlineStatusError"),
+              className: "seal-badge seal-badge-error",
+            };
+          }
+          if (summary.confirmationStatus === "invalid_signature") {
+            return {
+              label: t("outlineStatusInvalidSig"),
+              className: "seal-badge seal-badge-error",
+            };
+          }
+          if (summary.confirmationStatus === "confirmed") {
+            return {
+              label: t("outlineStatusConfirmed"),
+              className: "seal-badge seal-badge-ok",
+            };
+          }
+          if (summary.confirmationStatus === "stale") {
+            return {
+              label: t("outlineStatusStale"),
+              className: "seal-badge seal-badge-warn",
+            };
+          }
+          const parts = [
+            t("outlineStatusUnconfirmed"),
+            `${summary.includedNodes} ${t("outlineStatsNodes")}`,
+          ];
+          if (summary.missingMaterials > 0) {
+            parts.push(`${summary.missingMaterials} ${t("outlineMissingMatShort")}`);
+          }
+          return {
+            label: parts.join(" · "),
+            className: "seal-badge seal-badge-info",
+          };
+        }
 
         async function api<T = any>(
           operation: string,
@@ -629,6 +764,9 @@ currentWindow.__ModuleLoader__.load({
             Array<{ path: string; name: string }>
           >([]);
           const [filePath, setFilePath] = React.useState("");
+          const [workflowMode, setWorkflowMode] = React.useState<
+            "outline_first" | "direct"
+          >("outline_first");
           const action = useAction();
           const healthyVaults = props.overview.vaults.filter(
             (item) => !item.error,
@@ -654,6 +792,7 @@ currentWindow.__ModuleLoader__.load({
                 deadline,
                 vaultId: vault,
                 files: targets,
+                workflowMode,
               });
               setFiles([]);
               setFilePath("");
@@ -870,6 +1009,44 @@ currentWindow.__ModuleLoader__.load({
                         ),
                     )
                   : h("p", { className: "seal-small" }, t("noVault")),
+                h(
+                  "div",
+                  { className: "seal-stack-sm" },
+                  h("span", { className: "seal-small" }, t("workflowModeLabel")),
+                  h(
+                    "div",
+                    { className: "seal-mode-group", role: "radiogroup", "aria-label": t("workflowModeLabel") },
+                    ...(
+                      [
+                        [
+                          "outline_first",
+                          t("workflowModeOutlineFirst"),
+                          t("workflowModeOutlineFirstDesc"),
+                        ],
+                        [
+                          "direct",
+                          t("workflowModeDirect"),
+                          t("workflowModeDirectDesc"),
+                        ],
+                      ] as const
+                    ).map(([mode, title, desc]) =>
+                      h(
+                        "button",
+                        {
+                          key: mode,
+                          type: "button",
+                          className: "seal-mode-option",
+                          role: "radio",
+                          "aria-checked": workflowMode === mode,
+                          "aria-pressed": workflowMode === mode,
+                          onClick: () => setWorkflowMode(mode),
+                        },
+                        h("strong", null, title),
+                        h("span", { className: "seal-small" }, desc),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
             h(
@@ -893,6 +1070,7 @@ currentWindow.__ModuleLoader__.load({
           overview: Overview;
           reload(): void;
           onGoStart(): void;
+          onOpenOutline(projectId: string): void;
         }) {
           const action = useAction();
           const projectDelete = useInlineDelete();
@@ -1003,6 +1181,16 @@ currentWindow.__ModuleLoader__.load({
                           { className: "seal-badge" },
                           `${t("linkedVault")}: ${linkedVaultName}`,
                         ),
+                        (project.outlineSummary?.kind !== "missing" ||
+                          project.project?.workflowMode !== "direct") &&
+                          (() => {
+                            const meta = outlineStatusMeta(project.outlineSummary);
+                            return h(
+                              "span",
+                              { className: meta.className },
+                              meta.label,
+                            );
+                          })(),
                         ...nonZeroCounts.map(([code, count]) =>
                           h(
                             "span",
@@ -1056,6 +1244,16 @@ currentWindow.__ModuleLoader__.load({
                               }),
                           },
                           available ? t("continue") : t("newSession"),
+                        ),
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            className: "seal-btn-sm",
+                            disabled: action.busy || projectDelete.busy,
+                            onClick: () => props.onOpenOutline(project.id),
+                          },
+                          t("editOutline"),
                         ),
                         h(
                           "button",
@@ -1214,10 +1412,29 @@ currentWindow.__ModuleLoader__.load({
                 ),
               row.actions.includes("modify") &&
                 h("button", { onClick: beginEdit }, t("modify")),
+              row.code === "C17" &&
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    onClick: () =>
+                      openGlobalOutlineEditor(review.projectId, row.nodeId),
+                  },
+                  t("editOutline"),
+                ),
               h(
                 "button",
-                { onClick: () => setAsking((value) => !value) },
-                t("ai"),
+                {
+                  onClick: () => {
+                    if (row.code === "C17" && !asking && !request.trim()) {
+                      setRequest(
+                        `请按已确认大纲核对并补齐${row.title ? `「${row.title}」` : "该大纲项"}（${row.reason}），完成后重新运行 seal_check。`,
+                      );
+                    }
+                    setAsking((value) => !value);
+                  },
+                },
+                t(row.code === "C17" ? "outlineAiFixC17" : "ai"),
               ),
             ),
             editing &&
@@ -1676,6 +1893,281 @@ currentWindow.__ModuleLoader__.load({
           );
         }
 
+        function OutlineQuickTab(props: {
+          projectId: string;
+          reviewRevision: string;
+          hasDrafts: boolean;
+          sessionId: string;
+          dirty: boolean;
+          reloadReview(): void;
+        }) {
+          const action = useAction();
+          const [confirmMissing, setConfirmMissing] = React.useState(false);
+          const resource = useResource<OutlineGetResponse>(
+            (signal) =>
+              api("outline_get", { projectId: props.projectId }, signal),
+            [props.projectId, props.reviewRevision],
+          );
+          React.useEffect(() => {
+            setConfirmMissing(false);
+          }, [props.projectId, props.reviewRevision]);
+          if (resource.state.kind !== "value") return resourceStatus(resource);
+          const data = resource.state.value;
+          if ("kind" in data && data.kind === "not_project") {
+            return h("p", { className: "seal-muted" }, t("noProject"));
+          }
+          const payload = data as Extract<
+            OutlineGetResponse,
+            { projectKind: "project" }
+          >;
+          const view = payload.view;
+          const summaryMeta = outlineStatusMeta({
+            kind: payload.outline.kind,
+            confirmationStatus: view.confirmationStatus,
+            confirmedAt: view.confirmedAt,
+            ...view.summary,
+          });
+          const canConfirm =
+            view.kind === "value" &&
+            view.summary.includedNodes > 0 &&
+            view.confirmationStatus !== "confirmed";
+          const executeConfirm = () =>
+            action.run(async () => {
+              const res = await api<{
+                confirmed: boolean;
+                digest: string;
+                confirmedAt: string;
+                prompt: string;
+              }>("outline_confirm", {
+                projectId: props.projectId,
+                expectedRevision: payload.revision,
+              });
+              setConfirmMissing(false);
+              await send(props.sessionId, res.prompt);
+              resource.reload();
+              props.reloadReview();
+            }, t("sent"));
+
+          if (view.kind === "missing") {
+            return h(
+              "div",
+              { className: "seal-stack" },
+              h("p", { className: "seal-muted" }, t("outlineNoOutlineYet")),
+              h(
+                "div",
+                { className: "seal-row" },
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    onClick: () => {
+                      if (!props.dirty || window.confirm(t("leave"))) {
+                        openGlobalOutlineEditor(props.projectId);
+                      }
+                    },
+                  },
+                  t("outlineOpenFull"),
+                ),
+              ),
+            );
+          }
+
+          if (view.kind === "error") {
+            return h(
+              "div",
+              { className: "seal-stack" },
+              h("p", { className: "seal-error", role: "alert" }, view.reason),
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "seal-btn-sm",
+                  onClick: () => {
+                    if (!props.dirty || window.confirm(t("leave"))) {
+                      openGlobalOutlineEditor(props.projectId);
+                    }
+                  },
+                },
+                t("outlineOpenFull"),
+              ),
+            );
+          }
+
+          return h(
+            "div",
+            { className: "seal-stack" },
+            h(
+              "div",
+              { className: "seal-row seal-between" },
+              h("span", { className: summaryMeta.className }, summaryMeta.label),
+              h(
+                "span",
+                { className: "seal-small" },
+                `${view.summary.volumeCount} ${t("outlineVolumes")}`,
+              ),
+            ),
+            h(
+              "div",
+              { className: "seal-row" },
+              h(
+                "span",
+                { className: "seal-badge" },
+                `${t("outlineStatsNodes")} ${view.summary.includedNodes}`,
+              ),
+              h(
+                "span",
+                {
+                  className: `seal-badge ${view.summary.missingMaterials > 0 ? "seal-badge-warn" : "seal-badge-ok"}`,
+                },
+                `${t("outlineStatsMissing")} ${view.summary.missingMaterials}`,
+              ),
+              h(
+                "span",
+                {
+                  className: `seal-badge ${view.summary.uncoveredRequirements > 0 ? "seal-badge-warn" : "seal-badge-ok"}`,
+                },
+                `${t("outlineStatsUncovered")} ${view.summary.uncoveredRequirements}`,
+              ),
+            ),
+            h(
+              "div",
+              { className: "seal-outline-compact-tree" },
+              ...view.rows.map((row) =>
+                h(
+                  "div",
+                  {
+                    key: row.id,
+                    className: `seal-outline-compact-row${row.included ? "" : " seal-outline-row-excluded"}`,
+                    style: { paddingLeft: `${8 + row.depth * 14}px` },
+                  },
+                  h(
+                    "span",
+                    {
+                      className: "seal-small",
+                      style: {
+                        color: row.included
+                          ? "var(--dsw-alias-label-primary)"
+                          : "var(--dsw-alias-label-tertiary)",
+                        textDecoration: row.included ? "none" : "line-through",
+                        flex: "1 1 0",
+                      },
+                    },
+                    `${row.number ? `${row.number} ` : ""}${row.title}`,
+                  ),
+                  h(
+                    "div",
+                    { className: "seal-row" },
+                    row.included &&
+                      row.resolvedMaterialStatus === "missing" &&
+                      h(
+                        "span",
+                        { className: "seal-badge seal-badge-warn" },
+                        t("outlineMatMissing"),
+                      ),
+                    row.included &&
+                      row.resolvedMaterialStatus === "needs_review" &&
+                      h(
+                        "span",
+                        { className: "seal-badge seal-badge-warn" },
+                        t("outlineMatNeedsReview"),
+                      ),
+                  ),
+                ),
+              ),
+            ),
+            h(
+              "div",
+              { className: "seal-row" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "seal-btn-sm",
+                  disabled: action.busy,
+                  onClick: () => {
+                    if (!props.dirty || window.confirm(t("leave"))) {
+                      openGlobalOutlineEditor(props.projectId);
+                    }
+                  },
+                },
+                t("outlineOpenFull"),
+              ),
+              canConfirm &&
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-primary seal-btn-sm",
+                    disabled: action.busy || props.dirty,
+                    onClick: () => {
+                      if (view.summary.missingMaterials > 0) {
+                        setConfirmMissing(true);
+                      } else {
+                        void executeConfirm();
+                      }
+                    },
+                  },
+                  t(
+                    props.hasDrafts
+                      ? "outlineReconfirm"
+                      : "outlineConfirmStart",
+                  ),
+                ),
+            ),
+            confirmMissing &&
+              h(
+                "div",
+                { className: "seal-confirm-inline", role: "region" },
+                h(
+                  "span",
+                  { className: "seal-confirm-inline-text" },
+                  `${t("outlineConfirmMissingWarn")}（${view.summary.missingMaterials} ${t("count")}）`,
+                ),
+                h(
+                  "div",
+                  { className: "seal-row" },
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-primary seal-btn-sm",
+                      disabled: action.busy,
+                      onClick: () => void executeConfirm(),
+                    },
+                    t("outlineConfirmAnyway"),
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-sm",
+                      disabled: action.busy,
+                      onClick: () => {
+                        setConfirmMissing(false);
+                        if (!props.dirty || window.confirm(t("leave"))) {
+                          openGlobalOutlineEditor(props.projectId);
+                        }
+                      },
+                    },
+                    t("outlineGoUpload"),
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-ghost seal-btn-sm",
+                      disabled: action.busy,
+                      onClick: () => setConfirmMissing(false),
+                    },
+                    t("cancelDelete"),
+                  ),
+                ),
+              ),
+            actionStatus(action),
+          );
+        }
+
         function ReviewPanel(props: { sealSessionId: string }) {
           const sessionId = props.sealSessionId;
           const sessions = React.useSyncExternalStore(
@@ -1686,6 +2178,7 @@ currentWindow.__ModuleLoader__.load({
           const [pages, setPages] = React.useState<Record<string, number>>({}),
             [sections, setSections] = React.useState<Record<string, string>>({}),
             [tab, setTab] = React.useState("review");
+          const autoSelectedRef = React.useRef<string | null>(null);
           const resource = useResource<ReviewState>(
             (signal) => api("review", { cwd, pages, sections }, signal),
             [cwd, JSON.stringify(pages), JSON.stringify(sections)],
@@ -1701,6 +2194,18 @@ currentWindow.__ModuleLoader__.load({
             } | null>(null);
           const review =
             resource.state.kind === "value" ? resource.state.value : null;
+          React.useEffect(() => {
+            if (
+              review?.kind === "project" &&
+              review.project.workflowMode !== "direct" &&
+              review.project.drafts.length === 0 &&
+              review.outlineSummary?.kind === "value" &&
+              autoSelectedRef.current !== review.projectId
+            ) {
+              autoSelectedRef.current = review.projectId;
+              setTab("outline");
+            }
+          }, [review]);
           React.useEffect(() => {
             if (
               review?.kind === "project" &&
@@ -1778,6 +2283,57 @@ currentWindow.__ModuleLoader__.load({
                     missingVaultLabel: t("missingVault"),
                   }),
                 ),
+                review.project.workflowMode !== "direct" &&
+                  review.project.drafts.length === 0 &&
+                  h(
+                    "div",
+                    {
+                      className:
+                        review.outlineSummary?.confirmationStatus === "stale"
+                          ? "seal-callout seal-callout-warn"
+                          : "seal-callout",
+                      style: { marginBottom: 10 },
+                    },
+                    h(
+                      "div",
+                      { className: "seal-callout-body" },
+                      h(
+                        "strong",
+                        { className: "seal-small" },
+                        outlineStatusMeta(review.outlineSummary).label,
+                      ),
+                      h(
+                        "span",
+                        { className: "seal-small" },
+                        review.outlineSummary?.kind === "missing"
+                          ? t("outlineGuidePending")
+                          : review.outlineSummary?.confirmationStatus ===
+                              "confirmed"
+                            ? t("outlineGuideConfirmed")
+                            : review.outlineSummary?.confirmationStatus ===
+                                "stale"
+                              ? t("outlineGuideStale")
+                              : t("outlineGuideReady"),
+                      ),
+                    ),
+                    review.outlineSummary?.kind === "value" &&
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          className: "seal-btn-sm",
+                          onClick: () => {
+                            if (tab !== "outline") setTab("outline");
+                            else if (!dirty || window.confirm(t("leave"))) {
+                              openGlobalOutlineEditor(review.projectId);
+                            }
+                          },
+                        },
+                        tab === "outline"
+                          ? t("outlineOpenFull")
+                          : t("outlineTab"),
+                      ),
+                  ),
                 h(
                   "div",
                   { className: "seal-banner" },
@@ -1874,7 +2430,12 @@ currentWindow.__ModuleLoader__.load({
                 h(
                   "nav",
                   { className: "seal-tabs" },
-                  ...["review", "requirements", "preview"].map((key) =>
+                  ...[
+                    ["outline", t("outlineTab")],
+                    ["review", t("review")],
+                    ["requirements", t("requirements")],
+                    ["preview", t("preview")],
+                  ].map(([key, label]) =>
                     h(
                       "button",
                       {
@@ -1882,10 +2443,19 @@ currentWindow.__ModuleLoader__.load({
                         "aria-selected": tab === key,
                         onClick: () => navigate(() => setTab(key)),
                       },
-                      t(key as DictionaryKey),
+                      label,
                     ),
                   ),
                 ),
+                tab === "outline" &&
+                  h(OutlineQuickTab, {
+                    projectId: review.projectId,
+                    reviewRevision: review.revision,
+                    hasDrafts: review.project.drafts.length > 0,
+                    sessionId,
+                    dirty,
+                    reloadReview: resource.reload,
+                  }),
                 tab === "review" &&
                   h(
                     "div",
@@ -4541,6 +5111,1955 @@ currentWindow.__ModuleLoader__.load({
           );
         }
 
+        function OutlineEditor(props: {
+          projectId: string;
+          focusNodeId: string | null;
+          onBackToProjects(): void;
+          onReloadOverview(): void;
+        }) {
+          const [reloadTick, setReloadTick] = React.useState(0);
+          const resource = useResource<OutlineGetResponse>(
+            (signal) =>
+              api("outline_get", { projectId: props.projectId }, signal),
+            [props.projectId, reloadTick],
+          );
+          const action = useAction();
+          const deleteConfirm = useInlineDelete();
+          const [draftOutline, setDraftOutline] =
+            React.useState<OutlineDocument | null>(null);
+          const [baselineOutline, setBaselineOutline] =
+            React.useState<OutlineDocument | null>(null);
+          const [serverRevision, setServerRevision] = React.useState("");
+          const [undoStack, setUndoStack] = React.useState<OutlineDocument[]>(
+            [],
+          );
+          const [redoStack, setRedoStack] = React.useState<OutlineDocument[]>(
+            [],
+          );
+          const [activeVolume, setActiveVolume] = React.useState("");
+          const [filter, setFilter] = React.useState<OutlineRowFilter>("all");
+          const [query, setQuery] = React.useState("");
+          const [selectedNodeId, setSelectedNodeId] = React.useState<
+            string | null
+          >(props.focusNodeId);
+          const [collapsedIds, setCollapsedIds] = React.useState<string[]>([]);
+          const [showAddVolume, setShowAddVolume] = React.useState(false);
+          const [newVolumeName, setNewVolumeName] = React.useState("");
+          const [confirmMissing, setConfirmMissing] = React.useState(false);
+          const [conflictError, setConflictError] = React.useState("");
+          const [selectedKbId, setSelectedKbId] = React.useState("");
+          const [uploadFiles, setUploadFiles] = React.useState<
+            Array<{ path: string; name: string }>
+          >([]);
+          const [uploadPath, setUploadPath] = React.useState("");
+          const [aiInstruction, setAiInstruction] = React.useState("");
+          const [titleDraft, setTitleDraft] = React.useState<{
+            id: string;
+            value: string;
+          } | null>(null);
+          const loadedRevisionRef = React.useRef("");
+          const localEditSeqRef = React.useRef(0);
+
+          const payload =
+            resource.state.kind === "value" &&
+            "projectKind" in resource.state.value
+              ? resource.state.value
+              : null;
+
+          const syncFromPayload = (nextPayload: Extract<
+            OutlineGetResponse,
+            { projectKind: "project" }
+          >) => {
+            setServerRevision(nextPayload.revision);
+            loadedRevisionRef.current = nextPayload.revision;
+            if (nextPayload.outline.kind === "value") {
+              setBaselineOutline(nextPayload.outline.outline);
+              setDraftOutline(nextPayload.outline.outline);
+              setActiveVolume((prev) =>
+                nextPayload.outline.kind === "value" &&
+                nextPayload.outline.outline.volumes.some((v) => v.name === prev)
+                  ? prev
+                  : (nextPayload.outline.kind === "value"
+                      ? nextPayload.outline.outline.volumes[0]?.name
+                      : undefined) ?? "",
+              );
+            } else {
+              setBaselineOutline(null);
+              setDraftOutline(null);
+            }
+            setUndoStack([]);
+            setRedoStack([]);
+            setConflictError("");
+            setConfirmMissing(false);
+          };
+
+          React.useEffect(() => {
+            if (!payload) return;
+            if (loadedRevisionRef.current === payload.revision) return;
+            syncFromPayload(payload);
+          }, [payload]);
+
+          React.useEffect(() => {
+            setUploadFiles([]);
+            setUploadPath("");
+            setSelectedKbId("");
+            setAiInstruction("");
+            setTitleDraft(null);
+            deleteConfirm.reset();
+          }, [selectedNodeId]);
+
+          React.useEffect(() => {
+            if (props.focusNodeId && draftOutline) {
+              const target = draftOutline.nodes.find(
+                (node) => node.id === props.focusNodeId,
+              );
+              if (target) {
+                setSelectedNodeId(target.id);
+                setActiveVolume(target.volume);
+              }
+            }
+          }, [props.focusNodeId, draftOutline?.nodes.length]);
+
+          const isDirty = Boolean(
+            draftOutline &&
+              (!baselineOutline ||
+                canonicalOutlineDigest(baselineOutline) !==
+                  canonicalOutlineDigest(draftOutline)),
+          );
+
+          React.useEffect(() => {
+            try {
+              if (isDirty) sessionStorage.setItem("seal:outline-dirty", "1");
+              else sessionStorage.removeItem("seal:outline-dirty");
+            } catch {
+              /* Ignore storage errors. */
+            }
+            const warn = (event: BeforeUnloadEvent) => {
+              if (isDirty) {
+                event.preventDefault();
+                event.returnValue = "";
+              }
+            };
+            window.addEventListener("beforeunload", warn);
+            return () => {
+              window.removeEventListener("beforeunload", warn);
+              try {
+                sessionStorage.removeItem("seal:outline-dirty");
+              } catch {
+                /* Ignore storage errors. */
+              }
+            };
+          }, [isDirty]);
+
+          const commitEdit = (next: OutlineDocument) => {
+            if (!draftOutline) return;
+            localEditSeqRef.current += 1;
+            setUndoStack((prev) => [...prev.slice(-49), draftOutline]);
+            setRedoStack([]);
+            setDraftOutline(next);
+            setConflictError("");
+            setConfirmMissing(false);
+            deleteConfirm.reset();
+          };
+
+          const undo = () => {
+            if (!draftOutline || undoStack.length === 0) return;
+            localEditSeqRef.current += 1;
+            const prev = undoStack[undoStack.length - 1];
+            setUndoStack((stack) => stack.slice(0, -1));
+            setRedoStack((stack) => [...stack, draftOutline]);
+            setDraftOutline(prev);
+            deleteConfirm.reset();
+          };
+
+          const redo = () => {
+            if (!draftOutline || redoStack.length === 0) return;
+            localEditSeqRef.current += 1;
+            const next = redoStack[redoStack.length - 1];
+            setRedoStack((stack) => stack.slice(0, -1));
+            setUndoStack((stack) => [...stack, draftOutline]);
+            setDraftOutline(next);
+            deleteConfirm.reset();
+          };
+
+          if (resource.state.kind !== "value") return resourceStatus(resource);
+          if ("kind" in resource.state.value && resource.state.value.kind === "not_project") {
+            return h(
+              "div",
+              { className: "seal-card seal-stack" },
+              h("p", { className: "seal-muted" }, t("noProject")),
+              h(
+                "button",
+                { type: "button", onClick: props.onBackToProjects },
+                t("backToProjects"),
+              ),
+            );
+          }
+          if (!payload) return null;
+
+          const leaveWithGuard = (fn: () => void) => {
+            if (!isDirty || window.confirm(t("leave"))) {
+              try {
+                sessionStorage.removeItem("seal:outline-dirty");
+              } catch {
+                /* Ignore storage errors. */
+              }
+              fn();
+            }
+          };
+
+          const createBlankOutline = () => {
+            localEditSeqRef.current += 1;
+            const initial: OutlineDocument = {
+              format: "seal-outline-1",
+              volumes: [{ name: "投标文件" }],
+              nodes: [],
+            };
+            setDraftOutline(initial);
+            setActiveVolume("投标文件");
+            setUndoStack([]);
+            setRedoStack([]);
+          };
+
+          if (!draftOutline) {
+            return h(
+              "section",
+              { className: "seal-stack" },
+              h(
+                "div",
+                { className: "seal-outline-topbar" },
+                h(
+                  "div",
+                  { className: "seal-row" },
+                  payload.binding?.sessionId &&
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "seal-btn-sm",
+                        onClick: () =>
+                          void openReview(payload.binding!.sessionId!),
+                      },
+                      t("backToSession"),
+                    ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-sm",
+                      onClick: props.onBackToProjects,
+                    },
+                    t("backToProjects"),
+                  ),
+                  h("strong", null, payload.project.name),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    onClick: () => {
+                      loadedRevisionRef.current = "";
+                      setReloadTick((v) => v + 1);
+                    },
+                  },
+                  t("refresh"),
+                ),
+              ),
+              payload.outline.kind === "error" &&
+                h(
+                  "p",
+                  { className: "seal-error", role: "alert" },
+                  payload.outline.reason,
+                ),
+              h(
+                "div",
+                { className: "seal-empty-hero" },
+                h("h2", null, t("outlineEditorTitle")),
+                h("p", { className: "seal-muted" }, t("outlineNoOutlineYet")),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-primary",
+                    onClick: createBlankOutline,
+                  },
+                  t("outlineCreateBlank"),
+                ),
+              ),
+            );
+          }
+
+          const liveConfirmationStatus: OutlineConfirmationStatus =
+            isDirty && payload.view.confirmationStatus === "confirmed"
+              ? "stale"
+              : payload.view.confirmationStatus;
+          const liveView = buildOutlineView({
+            outlineState: { kind: "value", outline: draftOutline },
+            confirmationStatus: liveConfirmationStatus,
+            confirmedAt:
+              liveConfirmationStatus === "confirmed"
+                ? payload.view.confirmedAt
+                : null,
+            baselineOutline,
+            requirements: payload.requirements,
+            kbRecords: payload.kbRecords,
+            materials: payload.materials,
+            c17Issues: payload.view.c17Issues,
+          });
+          const volumeName = draftOutline.volumes.some(
+            (v) => v.name === activeVolume,
+          )
+            ? activeVolume
+            : (draftOutline.volumes[0]?.name ?? "");
+          const filterCounts = outlineFilterCounts(liveView.rows, volumeName);
+          const filteredRows = filterOutlineRows(liveView.rows, {
+            query,
+            filter,
+            volume: volumeName,
+          });
+          const collapsedSet = new Set(collapsedIds);
+          const filteringActive = Boolean(query.trim()) || filter !== "all";
+          const visibleRows = filteringActive
+            ? filteredRows
+            : (() => {
+                const rowMap = new Map(
+                  filteredRows.map((row) => [row.id, row]),
+                );
+                return filteredRows.filter((row) => {
+                  let parentId = row.parentId;
+                  while (parentId !== null) {
+                    if (collapsedSet.has(parentId)) return false;
+                    parentId = rowMap.get(parentId)?.parentId ?? null;
+                  }
+                  return true;
+                });
+              })();
+          const navRows = filterOutlineRows(liveView.rows, {
+            query,
+            filter: "all",
+            volume: volumeName,
+          });
+          const selectedRow: OutlineRowView | null =
+            selectedNodeId !== null
+              ? (liveView.rows.find((row) => row.id === selectedNodeId) ?? null)
+              : null;
+
+          const statusMeta = outlineStatusMeta({
+            kind: "value",
+            confirmationStatus: liveView.confirmationStatus,
+            confirmedAt: liveView.confirmedAt,
+            ...liveView.summary,
+          });
+
+          const saveDraftOutline = async (): Promise<
+            Extract<OutlineGetResponse, { projectKind: "project" }>
+          > => {
+            const sentSeq = localEditSeqRef.current;
+            try {
+              const saved = await api<
+                Extract<OutlineGetResponse, { projectKind: "project" }>
+              >("outline_save", {
+                projectId: props.projectId,
+                expectedRevision: serverRevision,
+                volumes: draftOutline.volumes,
+                nodes: draftOutline.nodes,
+              });
+              const reconciled = reconcileOutlineSaveResult(
+                {
+                  serverRevision,
+                  baselineOutline,
+                  draftOutline,
+                  undoStack,
+                  redoStack,
+                  conflictError,
+                  confirmMissing,
+                },
+                saved,
+                sentSeq,
+                localEditSeqRef.current,
+              );
+              if (reconciled.syncedDraft) {
+                syncFromPayload(saved);
+              } else {
+                setServerRevision(reconciled.state.serverRevision);
+                loadedRevisionRef.current = reconciled.state.serverRevision;
+                setBaselineOutline(reconciled.state.baselineOutline);
+                setConflictError(reconciled.state.conflictError);
+              }
+              props.onReloadOverview();
+              return saved;
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : String(error);
+              if (msg.includes("版本冲突")) setConflictError(msg);
+              throw error;
+            }
+          };
+
+          const executeConfirmOutline = () =>
+            action.run(
+              () =>
+                runOutlineConfirmFlow({
+                  getEditSeq: () => localEditSeqRef.current,
+                  isDirty,
+                  initialRevision: serverRevision,
+                  saveDraft: saveDraftOutline,
+                  confirmOutline: (expectedRevision) =>
+                    api<{
+                      confirmed: boolean;
+                      digest: string;
+                      confirmedAt: string;
+                      prompt: string;
+                    }>("outline_confirm", {
+                      projectId: props.projectId,
+                      expectedRevision,
+                    }),
+                  onConfirmFinished: () => setConfirmMissing(false),
+                  onClearDirty: () => {
+                    try {
+                      sessionStorage.removeItem("seal:outline-dirty");
+                    } catch {
+                      /* Ignore storage errors. */
+                    }
+                  },
+                  onReloadOverview: props.onReloadOverview,
+                  sessionId: payload.binding?.sessionId ?? null,
+                  sendPrompt: (sid, prompt) => send(sid, prompt),
+                  openReview: (sid) => openReview(sid),
+                  onReloadUnbound: () => {
+                    loadedRevisionRef.current = "";
+                    setReloadTick((v) => v + 1);
+                  },
+                }),
+              t("sent"),
+            );
+
+          const levelLabel = (level: number) =>
+            t(`outlineLevel${Math.min(6, Math.max(1, level))}` as DictionaryKey);
+
+          const kindLabel = (kind: OutlineNodeKind) =>
+            kind === "template"
+              ? t("outlineKindTemplate")
+              : kind === "authored"
+                ? t("outlineKindAuthored")
+                : t("outlineKindAttachment");
+
+          const addNodeHelper = (opts: {
+            parentId: string | null;
+            level: number;
+            afterNodeId?: string;
+            title?: string;
+            kind?: OutlineNodeKind;
+            requirementIds?: string[];
+          }) => {
+            const existingIds = new Set(draftOutline.nodes.map((n) => n.id));
+            const newId = createOutlineNodeId(existingIds, "sec");
+            const targetVolume =
+              volumeName || draftOutline.volumes[0]?.name || "投标文件";
+            const volumes =
+              draftOutline.volumes.length > 0
+                ? draftOutline.volumes
+                : [{ name: targetVolume }];
+            const newNode: OutlineNode = {
+              id: newId,
+              volume: targetVolume,
+              parentId: opts.parentId,
+              level: Math.min(6, Math.max(1, opts.level)),
+              title: opts.title ?? "新增章节",
+              kind: opts.kind ?? "authored",
+              included: true,
+              ...(opts.requirementIds
+                ? { requirementIds: opts.requirementIds }
+                : {}),
+            };
+            const next = addOutlineNode(
+              { ...draftOutline, volumes },
+              newNode,
+              {
+                parentId: opts.parentId,
+                ...(opts.afterNodeId ? { afterNodeId: opts.afterNodeId } : {}),
+                updatedBy: "human",
+              },
+            );
+            commitEdit(next);
+            setSelectedNodeId(newId);
+            if (opts.parentId) {
+              setCollapsedIds((prev) =>
+                prev.filter((id) => id !== opts.parentId),
+              );
+            }
+          };
+
+          const allRequirements =
+            payload.requirements.kind === "value"
+              ? [...payload.requirements.items].sort(
+                  (a, b) => Number(b.mustRespond) - Number(a.mustRespond),
+                )
+              : [];
+          const coveredReqIds = new Set<string>();
+          for (const node of draftOutline.nodes) {
+            if (!node.included) continue;
+            for (const reqId of node.requirementIds ?? []) {
+              coveredReqIds.add(reqId);
+            }
+          }
+
+          const uploadTargets = [
+            ...uploadFiles.map((f) => f.path),
+            ...(uploadPath.trim() ? [uploadPath.trim()] : []),
+          ];
+
+          const handleUploadMaterial = (nodeId: string) =>
+            action.run(async () => {
+              const targetFile = uploadTargets[0];
+              if (!targetFile) throw new Error("请选择或输入本地材料文件路径");
+              const nodeOnDisk = Boolean(
+                baselineOutline?.nodes.some((node) => node.id === nodeId),
+              );
+              const persistDirectly = !isDirty && nodeOnDisk;
+              try {
+                const res = await api<
+                  { binding: OutlineEvidenceBinding } & Extract<
+                    OutlineGetResponse,
+                    { projectKind: "project" }
+                  >
+                >("outline_upload_material", {
+                  projectId: props.projectId,
+                  expectedRevision: serverRevision,
+                  filePath: targetFile,
+                  ...(persistDirectly ? { nodeId } : {}),
+                });
+                setUploadFiles([]);
+                setUploadPath("");
+                if (persistDirectly) {
+                  syncFromPayload(res);
+                } else {
+                  setServerRevision(res.revision);
+                  loadedRevisionRef.current = res.revision;
+                  if (res.outline.kind === "value") {
+                    setBaselineOutline(res.outline.outline);
+                  }
+                  const updatedLocal = bindEvidenceToNode(
+                    draftOutline,
+                    nodeId,
+                    res.binding,
+                    { updatedBy: "human" },
+                  );
+                  commitEdit(updatedLocal);
+                }
+                props.onReloadOverview();
+              } catch (error) {
+                const msg =
+                  error instanceof Error ? error.message : String(error);
+                if (msg.includes("版本冲突")) setConflictError(msg);
+                throw error;
+              }
+            }, t("processed"));
+
+          const handleAddVolume = () => {
+            const trimmed = newVolumeName.trim();
+            if (!trimmed) return;
+            if (draftOutline.volumes.some((v) => v.name === trimmed)) return;
+            commitEdit({
+              ...draftOutline,
+              volumes: [...draftOutline.volumes, { name: trimmed }],
+            });
+            setActiveVolume(trimmed);
+            setNewVolumeName("");
+            setShowAddVolume(false);
+          };
+
+          const nowIso = new Date().toISOString();
+          const selectedLocked = Boolean(
+            selectedRow?.lockedTemplate && !selectedRow?.optional,
+          );
+          const missingRows = liveView.rows.filter(
+            (r) => r.included && r.resolvedMaterialStatus === "missing",
+          );
+
+          return h(
+            "section",
+            { className: "seal-stack" },
+            h(
+              "div",
+              { className: "seal-outline-topbar" },
+              h(
+                "div",
+                { className: "seal-row" },
+                payload.binding?.sessionId &&
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-sm",
+                      onClick: () =>
+                        leaveWithGuard(
+                          () => void openReview(payload.binding!.sessionId!),
+                        ),
+                    },
+                    t("backToSession"),
+                  ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    onClick: () => leaveWithGuard(props.onBackToProjects),
+                  },
+                  t("backToProjects"),
+                ),
+                h("strong", null, payload.project.name),
+                h("span", { className: statusMeta.className }, statusMeta.label),
+                h(
+                  "span",
+                  { className: "seal-badge" },
+                  t("outlineSafeNotice"),
+                ),
+              ),
+              h(
+                "div",
+                { className: "seal-row" },
+                isDirty &&
+                  h(
+                    "span",
+                    { className: "seal-badge seal-badge-warn" },
+                    t("outlineUnsaved"),
+                  ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    disabled: undoStack.length === 0 || action.busy,
+                    onClick: undo,
+                  },
+                  t("outlineUndo"),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    disabled: redoStack.length === 0 || action.busy,
+                    onClick: redo,
+                  },
+                  t("outlineRedo"),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    disabled: !isDirty || action.busy,
+                    onClick: () =>
+                      action.run(() => saveDraftOutline(), t("outlineSaved")),
+                  },
+                  t("outlineSave"),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-primary seal-btn-sm",
+                    disabled:
+                      action.busy || liveView.summary.includedNodes === 0,
+                    onClick: () => {
+                      if (liveView.summary.missingMaterials > 0) {
+                        setConfirmMissing(true);
+                      } else {
+                        void executeConfirmOutline();
+                      }
+                    },
+                  },
+                  t(
+                    payload.project.drafts.length > 0
+                      ? "outlineReconfirm"
+                      : "outlineConfirmStart",
+                  ),
+                ),
+              ),
+            ),
+            conflictError &&
+              h(
+                "div",
+                { className: "seal-callout seal-callout-warn", role: "alert" },
+                h(
+                  "div",
+                  { className: "seal-callout-body" },
+                  h("strong", null, conflictError),
+                  h("span", { className: "seal-small" }, t("outlineConflictBanner")),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "seal-btn-sm",
+                    onClick: () => {
+                      loadedRevisionRef.current = "";
+                      setReloadTick((v) => v + 1);
+                    },
+                  },
+                  t("outlineReloadLatest"),
+                ),
+              ),
+            confirmMissing &&
+              h(
+                "div",
+                { className: "seal-confirm-inline", role: "region" },
+                h(
+                  "span",
+                  { className: "seal-confirm-inline-text" },
+                  `${t("outlineConfirmMissingWarn")}（${liveView.summary.missingMaterials} ${t("count")}）`,
+                ),
+                h(
+                  "div",
+                  { className: "seal-row" },
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-primary seal-btn-sm",
+                      disabled: action.busy,
+                      onClick: () => void executeConfirmOutline(),
+                    },
+                    t("outlineConfirmAnyway"),
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-sm",
+                      disabled: action.busy,
+                      onClick: () => {
+                        setConfirmMissing(false);
+                        setFilter("missing_material");
+                      },
+                    },
+                    t("cancelDelete"),
+                  ),
+                ),
+              ),
+            h(
+              "div",
+              { className: "seal-row seal-between" },
+              h(
+                "div",
+                { className: "seal-segmented", role: "tablist" },
+                ...draftOutline.volumes.map((vol) =>
+                  h(
+                    "button",
+                    {
+                      key: vol.name,
+                      type: "button",
+                      role: "tab",
+                      "aria-selected": volumeName === vol.name,
+                      onClick: () => {
+                        setActiveVolume(vol.name);
+                        setSelectedNodeId(null);
+                      },
+                    },
+                    vol.name,
+                  ),
+                ),
+              ),
+              h(
+                "div",
+                { className: "seal-row" },
+                showAddVolume
+                  ? h(
+                      "div",
+                      { className: "seal-row" },
+                      h("input", {
+                        value: newVolumeName,
+                        placeholder: t("outlineVolumePlaceholder"),
+                        style: { width: 200 },
+                        onChange: (e: any) => setNewVolumeName(e.target.value),
+                      }),
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          className: "seal-btn-primary seal-btn-sm",
+                          disabled: !newVolumeName.trim(),
+                          onClick: handleAddVolume,
+                        },
+                        t("outlineAddVolumeConfirm"),
+                      ),
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          className: "seal-btn-ghost seal-btn-sm",
+                          onClick: () => setShowAddVolume(false),
+                        },
+                        t("cancelDelete"),
+                      ),
+                    )
+                  : h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "seal-btn-sm",
+                        onClick: () => setShowAddVolume(true),
+                      },
+                      t("outlineAddVolume"),
+                    ),
+              ),
+            ),
+            h(
+              "div",
+              { className: "seal-outline-filters", role: "group" },
+              ...(
+                [
+                  ["all", t("outlineFilterAll")],
+                  ["missing_material", t("outlineFilterMissing")],
+                  ["needs_review", t("outlineFilterNeedsReview")],
+                  ["uncovered_req", t("outlineFilterUncovered")],
+                  ["template", t("outlineFilterTemplate")],
+                  ["authored", t("outlineFilterAuthored")],
+                  ["attachment", t("outlineFilterAttachment")],
+                  ["excluded", t("outlineFilterExcluded")],
+                  ...(filterCounts.c17 > 0
+                    ? ([["c17", t("outlineFilterC17")]] as const)
+                    : []),
+                ] as ReadonlyArray<readonly [OutlineRowFilter, string]>
+              ).map(([key, label]) =>
+                h(
+                  "button",
+                  {
+                    key,
+                    type: "button",
+                    className: "seal-section-chip",
+                    "aria-pressed": filter === key,
+                    onClick: () => setFilter(key),
+                  },
+                  `${label} (${filterCounts[key]})`,
+                ),
+              ),
+            ),
+            actionStatus(action),
+            h(
+              "div",
+              { className: "seal-outline-grid" },
+              h(
+                "aside",
+                { className: "seal-outline-nav" },
+                h(
+                  "div",
+                  { className: "seal-row seal-between" },
+                  h("h3", null, t("outlineNavTitle")),
+                  selectedNodeId &&
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "seal-btn-ghost seal-btn-sm",
+                        onClick: () => setSelectedNodeId(null),
+                      },
+                      t("outlineDetailOverview"),
+                    ),
+                ),
+                h("input", {
+                  value: query,
+                  placeholder: t("outlineSearchPlaceholder"),
+                  "aria-label": t("outlineSearchPlaceholder"),
+                  onChange: (e: any) => setQuery(e.target.value),
+                }),
+                h(
+                  "div",
+                  { className: "seal-outline-nav-list" },
+                  ...navRows.map((row) =>
+                    h(
+                      "button",
+                      {
+                        key: row.id,
+                        type: "button",
+                        className: "seal-outline-nav-item",
+                        "aria-current":
+                          selectedNodeId === row.id ? "true" : undefined,
+                        style: {
+                          paddingLeft: `${8 + row.depth * 12}px`,
+                          textDecoration: row.included ? "none" : "line-through",
+                        },
+                        onClick: () => setSelectedNodeId(row.id),
+                      },
+                      `${row.number ? `${row.number} ` : ""}${row.title}`,
+                    ),
+                  ),
+                ),
+                h(
+                  "div",
+                  { className: "seal-outline-stat-grid" },
+                  h(
+                    "div",
+                    { className: "seal-outline-stat-cell" },
+                    h("span", { className: "seal-small" }, t("outlineStatChanges")),
+                    h("strong", null, liveView.summary.changesCount),
+                  ),
+                  h(
+                    "div",
+                    { className: "seal-outline-stat-cell" },
+                    h("span", { className: "seal-small" }, t("outlineStatExcluded")),
+                    h("strong", null, liveView.summary.excludedNodes),
+                  ),
+                  h(
+                    "div",
+                    { className: "seal-outline-stat-cell" },
+                    h("span", { className: "seal-small" }, t("outlineStatMissing")),
+                    h("strong", null, liveView.summary.missingMaterials),
+                  ),
+                  h(
+                    "div",
+                    { className: "seal-outline-stat-cell" },
+                    h("span", { className: "seal-small" }, t("outlineStatUncovered")),
+                    h("strong", null, liveView.summary.uncoveredRequirements),
+                  ),
+                ),
+              ),
+              h(
+                "section",
+                { className: "seal-outline-main" },
+                h(
+                  "div",
+                  { className: "seal-row seal-between" },
+                  h(
+                    "h2",
+                    { style: { margin: 0 } },
+                    `${t("outlineTreeTitle")} · ${liveView.summary.includedNodes}`,
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "seal-btn-primary seal-btn-sm",
+                      onClick: () =>
+                        addNodeHelper({ parentId: null, level: 1 }),
+                    },
+                    t("outlineAddRoot"),
+                  ),
+                ),
+                visibleRows.length === 0
+                  ? h("p", { className: "seal-muted" }, t("outlineEmptyTreeHint"))
+                  : visibleRows.map((row) => {
+                      const isSelected = selectedNodeId === row.id;
+                      const isLocked = Boolean(
+                        row.lockedTemplate && !row.optional,
+                      );
+                      const isCollapsed = collapsedSet.has(row.id);
+                      return h(
+                        "article",
+                        {
+                          key: row.id,
+                          className: `seal-outline-row${isSelected ? " seal-outline-row-selected" : ""}${row.included ? "" : " seal-outline-row-excluded"}`,
+                          style: { marginLeft: `${row.depth * 18}px` },
+                          "data-seal-outline-node": row.id,
+                        },
+                        h(
+                          "div",
+                          { className: "seal-outline-row-head" },
+                          row.hasChildren && !filteringActive
+                            ? h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-ghost seal-outline-collapse",
+                                  "aria-label": row.title,
+                                  onClick: () =>
+                                    setCollapsedIds((prev) =>
+                                      isCollapsed
+                                        ? prev.filter((id) => id !== row.id)
+                                        : [...prev, row.id],
+                                    ),
+                                },
+                                isCollapsed ? "▸" : "▾",
+                              )
+                            : null,
+                          h(
+                            "span",
+                            { className: "seal-outline-level" },
+                            levelLabel(row.level),
+                          ),
+                          isSelected && !isLocked
+                            ? h(
+                                "div",
+                                {
+                                  className: "seal-row",
+                                  style: { flex: "1 1 220px" },
+                                },
+                                h("input", {
+                                  value: row.number ?? "",
+                                  placeholder: t("outlineNodeNumber"),
+                                  style: { width: 84, flex: "0 0 84px" },
+                                  onChange: (e: any) =>
+                                    commitEdit(
+                                      updateOutlineNode(
+                                        draftOutline,
+                                        row.id,
+                                        {
+                                          number: e.target.value || undefined,
+                                        },
+                                        { updatedAt: nowIso, updatedBy: "human" },
+                                      ),
+                                    ),
+                                }),
+                                h("input", {
+                                  value:
+                                    titleDraft?.id === row.id
+                                      ? titleDraft.value
+                                      : row.title,
+                                  style: { flex: "1 1 140px" },
+                                  onChange: (e: any) => {
+                                    const nextVal = String(e.target.value);
+                                    setTitleDraft({ id: row.id, value: nextVal });
+                                    if (nextVal.trim()) {
+                                      commitEdit(
+                                        updateOutlineNode(
+                                          draftOutline,
+                                          row.id,
+                                          { title: nextVal },
+                                          { updatedAt: nowIso, updatedBy: "human" },
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  onBlur: () => setTitleDraft(null),
+                                }),
+                              )
+                            : h(
+                                "span",
+                                {
+                                  className: "seal-outline-row-title",
+                                  style: {
+                                    textDecoration: row.included
+                                      ? "none"
+                                      : "line-through",
+                                  },
+                                  onClick: () => setSelectedNodeId(row.id),
+                                },
+                                `${row.number ? `${row.number} ` : ""}${row.title}`,
+                              ),
+                          h(
+                            "div",
+                            {
+                              className: "seal-row",
+                              onClick: () => setSelectedNodeId(row.id),
+                            },
+                            h(
+                              "span",
+                              { className: "seal-badge" },
+                              isLocked
+                                ? t("outlineLockedTemplate")
+                                : kindLabel(row.kind),
+                            ),
+                            row.resolvedMaterialStatus === "missing" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-warn" },
+                                t("outlineMatMissing"),
+                              ),
+                            row.resolvedMaterialStatus === "needs_review" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-warn" },
+                                t("outlineMatNeedsReview"),
+                              ),
+                            row.resolvedMaterialStatus === "ready" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-ok" },
+                                t("outlineMatReady"),
+                              ),
+                            (row.requirementIds?.length ?? 0) > 0 &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-info" },
+                                `${row.requirementIds!.length} ${t("outlineReqCountSuffix")}`,
+                              ),
+                            row.c17Issues.length > 0 &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-error" },
+                                `C17 (${row.c17Issues.length})`,
+                              ),
+                          ),
+                        ),
+                        isSelected &&
+                          h(
+                            "div",
+                            { className: "seal-stack-sm" },
+                            h(
+                              "div",
+                              { className: "seal-row" },
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  onClick: () =>
+                                    addNodeHelper({
+                                      parentId: row.parentId,
+                                      level: row.level,
+                                      afterNodeId: row.id,
+                                    }),
+                                },
+                                t("outlineAddSibling"),
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled: row.level >= 6,
+                                  onClick: () =>
+                                    addNodeHelper({
+                                      parentId: row.id,
+                                      level: Math.min(6, row.level + 1),
+                                      afterNodeId: row.id,
+                                    }),
+                                },
+                                t("outlineAddChild"),
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled: !canMoveOutlineNode(
+                                    draftOutline,
+                                    row.id,
+                                    "up",
+                                  ),
+                                  onClick: () =>
+                                    commitEdit(
+                                      moveOutlineNode(
+                                        draftOutline,
+                                        row.id,
+                                        "up",
+                                        { updatedAt: nowIso, updatedBy: "human" },
+                                      ),
+                                    ),
+                                },
+                                `↑ ${t("outlineMoveUp")}`,
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled: !canMoveOutlineNode(
+                                    draftOutline,
+                                    row.id,
+                                    "down",
+                                  ),
+                                  onClick: () =>
+                                    commitEdit(
+                                      moveOutlineNode(
+                                        draftOutline,
+                                        row.id,
+                                        "down",
+                                        { updatedAt: nowIso, updatedBy: "human" },
+                                      ),
+                                    ),
+                                },
+                                `↓ ${t("outlineMoveDown")}`,
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled: !canOutdentOutlineNode(
+                                    draftOutline,
+                                    row.id,
+                                  ),
+                                  onClick: () =>
+                                    commitEdit(
+                                      outdentOutlineNode(draftOutline, row.id, {
+                                        updatedAt: nowIso,
+                                        updatedBy: "human",
+                                      }),
+                                    ),
+                                },
+                                `← ${t("outlineOutdent")}`,
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled:
+                                    row.level >= 6 ||
+                                    !canIndentOutlineNode(draftOutline, row.id),
+                                  onClick: () =>
+                                    commitEdit(
+                                      indentOutlineNode(draftOutline, row.id, {
+                                        updatedAt: nowIso,
+                                        updatedBy: "human",
+                                      }),
+                                    ),
+                                },
+                                `→ ${t("outlineIndent")}`,
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled: isLocked,
+                                  onClick: () =>
+                                    commitEdit(
+                                      updateOutlineNode(
+                                        draftOutline,
+                                        row.id,
+                                        { included: !row.included },
+                                        { updatedAt: nowIso, updatedBy: "human" },
+                                      ),
+                                    ),
+                                },
+                                t(
+                                  row.included
+                                    ? "outlineSkip"
+                                    : "outlineInclude",
+                                ),
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-danger seal-btn-sm",
+                                  disabled: !canDeleteOutlineNode(
+                                    draftOutline,
+                                    row.id,
+                                  ),
+                                  onClick: () => deleteConfirm.open(row.id),
+                                },
+                                t("outlineDeleteNode"),
+                              ),
+                            ),
+                            deleteConfirm.targetKey === row.id &&
+                              h(
+                                "div",
+                                { className: "seal-confirm-inline" },
+                                h(
+                                  "span",
+                                  { className: "seal-confirm-inline-text" },
+                                  `${t("outlineDeleteConfirm")}（${row.title}）`,
+                                ),
+                                h(
+                                  "div",
+                                  { className: "seal-row" },
+                                  h(
+                                    "button",
+                                    {
+                                      type: "button",
+                                      className:
+                                        "seal-btn-danger-solid seal-btn-sm",
+                                      onClick: () => {
+                                        deleteConfirm.close();
+                                        commitEdit(
+                                          deleteOutlineNode(
+                                            draftOutline,
+                                            row.id,
+                                            {
+                                              updatedAt: nowIso,
+                                              updatedBy: "human",
+                                            },
+                                          ),
+                                        );
+                                        setSelectedNodeId(null);
+                                      },
+                                    },
+                                    t("confirmDelete"),
+                                  ),
+                                  h(
+                                    "button",
+                                    {
+                                      type: "button",
+                                      className: "seal-btn-sm",
+                                      onClick: deleteConfirm.close,
+                                    },
+                                    t("cancelDelete"),
+                                  ),
+                                ),
+                              ),
+                          ),
+                      );
+                    }),
+              ),
+              h(
+                "aside",
+                { className: "seal-outline-drawer" },
+                selectedRow
+                  ? h(
+                      React.Fragment,
+                      null,
+                      h(
+                        "div",
+                        { className: "seal-row seal-between" },
+                        h("h3", null, t("outlineDetailTitle")),
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            className: "seal-btn-ghost seal-btn-sm",
+                            onClick: () => setSelectedNodeId(null),
+                          },
+                          t("closeDetail"),
+                        ),
+                      ),
+                      h(
+                        "label",
+                        null,
+                        t("outlineNodeNumber"),
+                        h("input", {
+                          value: selectedRow.number ?? "",
+                          onChange: (e: any) =>
+                            commitEdit(
+                              updateOutlineNode(
+                                draftOutline,
+                                selectedRow.id,
+                                { number: e.target.value || undefined },
+                                { updatedAt: nowIso, updatedBy: "human" },
+                              ),
+                            ),
+                        }),
+                      ),
+                      h(
+                        "label",
+                        null,
+                        t("outlineNodeTitle"),
+                        h("input", {
+                          value:
+                            titleDraft?.id === selectedRow.id
+                              ? titleDraft.value
+                              : selectedRow.title,
+                          disabled: selectedLocked,
+                          onChange: (e: any) => {
+                            const nextVal = String(e.target.value);
+                            setTitleDraft({
+                              id: selectedRow.id,
+                              value: nextVal,
+                            });
+                            if (nextVal.trim()) {
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { title: nextVal },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              );
+                            }
+                          },
+                          onBlur: () => setTitleDraft(null),
+                        }),
+                      ),
+                      h(
+                        "label",
+                        null,
+                        t("outlineNodeKind"),
+                        h(
+                          "select",
+                          {
+                            value: selectedRow.kind,
+                            disabled: selectedLocked,
+                            onChange: (e: any) =>
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { kind: e.target.value as OutlineNodeKind },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              ),
+                          },
+                          h("option", { value: "template" }, t("outlineKindTemplate")),
+                          h("option", { value: "authored" }, t("outlineKindAuthored")),
+                          h(
+                            "option",
+                            { value: "attachment" },
+                            t("outlineKindAttachment"),
+                          ),
+                        ),
+                      ),
+                      h(
+                        "div",
+                        { className: "seal-row" },
+                        h("input", {
+                          id: `inc-${selectedRow.id}`,
+                          type: "checkbox",
+                          checked: selectedRow.included,
+                          disabled: selectedLocked,
+                          onChange: (e: any) =>
+                            commitEdit(
+                              updateOutlineNode(
+                                draftOutline,
+                                selectedRow.id,
+                                { included: Boolean(e.target.checked) },
+                                { updatedAt: nowIso, updatedBy: "human" },
+                              ),
+                            ),
+                        }),
+                        h(
+                          "span",
+                          { className: "seal-small" },
+                          t("outlineIncludedToggle"),
+                        ),
+                      ),
+                      selectedRow.kind === "template" &&
+                        h(
+                          "div",
+                          { className: "seal-row" },
+                          h("input", {
+                            id: `opt-${selectedRow.id}`,
+                            type: "checkbox",
+                            checked: Boolean(selectedRow.optional),
+                            disabled: selectedLocked,
+                            onChange: (e: any) =>
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { optional: Boolean(e.target.checked) },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              ),
+                          }),
+                          h(
+                            "span",
+                            { className: "seal-small" },
+                            t("outlineNodeOptional"),
+                          ),
+                        ),
+                      h(
+                        "label",
+                        null,
+                        t("outlineNodeExpectedHeading"),
+                        h("input", {
+                          value: selectedRow.expectedHeading ?? "",
+                          placeholder: selectedRow.title,
+                          onChange: (e: any) =>
+                            commitEdit(
+                              updateOutlineNode(
+                                draftOutline,
+                                selectedRow.id,
+                                {
+                                  expectedHeading: e.target.value || undefined,
+                                },
+                                { updatedAt: nowIso, updatedBy: "human" },
+                              ),
+                            ),
+                        }),
+                      ),
+                      h(
+                        "label",
+                        null,
+                        t("outlineNodeNote"),
+                        h("textarea", {
+                          value: selectedRow.note ?? "",
+                          placeholder: t("outlineNodeNotePlaceholder"),
+                          onChange: (e: any) =>
+                            commitEdit(
+                              updateOutlineNode(
+                                draftOutline,
+                                selectedRow.id,
+                                { note: e.target.value || undefined },
+                                { updatedAt: nowIso, updatedBy: "human" },
+                              ),
+                            ),
+                        }),
+                      ),
+                      h(
+                        "div",
+                        { className: "seal-stack-sm seal-divider" },
+                        h("h3", null, t("outlineEvidenceSection")),
+                        ...selectedRow.resolvedEvidence.map((ev) => {
+                          const materialHref =
+                            ev.source === "material"
+                              ? `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: ev.ref })}`
+                              : "";
+                          const isImg =
+                            ev.source === "material" &&
+                            /\.(png|jpe?g|webp|bmp|tif|tiff|gif|svg)$/i.test(
+                              ev.ref,
+                            );
+                          return h(
+                            "div",
+                            {
+                              key: `${ev.source}:${ev.ref}`,
+                              className: "seal-card-compact seal-stack-sm",
+                            },
+                            h(
+                              "div",
+                              { className: "seal-row seal-between" },
+                              h(
+                                "strong",
+                                { className: "seal-small" },
+                                ev.title ?? ev.label ?? ev.ref,
+                              ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-ghost seal-btn-sm",
+                                  onClick: () =>
+                                    commitEdit(
+                                      unbindEvidenceFromNode(
+                                        draftOutline,
+                                        selectedRow.id,
+                                        ev.source,
+                                        ev.ref,
+                                        { updatedAt: nowIso, updatedBy: "human" },
+                                      ),
+                                    ),
+                                },
+                                t("outlineUnbind"),
+                              ),
+                            ),
+                            h(
+                              "div",
+                              { className: "seal-row" },
+                              h(
+                                "span",
+                                {
+                                  className: `seal-badge ${ev.status === "ready" ? "seal-badge-ok" : ev.status === "unverified" ? "seal-badge-warn" : "seal-badge-error"}`,
+                                },
+                                ev.source === "kb"
+                                  ? ev.status === "ready"
+                                    ? t("verified")
+                                    : ev.status === "unverified"
+                                      ? t("unverified")
+                                      : t("outlineMatMissing")
+                                  : ev.status === "ready"
+                                    ? t("outlineMatReady")
+                                    : t("outlineMatMissing"),
+                              ),
+                              ev.renderedPages &&
+                                ev.renderedPages.length > 0 &&
+                                h(
+                                  "span",
+                                  { className: "seal-badge seal-badge-info" },
+                                  `${t("outlinePdfPagesCount")} ${ev.renderedPages.length} 页`,
+                                ),
+                              materialHref &&
+                                h(
+                                  "a",
+                                  {
+                                    className: "seal-link seal-btn-sm",
+                                    href: materialHref,
+                                    target: "_blank",
+                                    rel: "noreferrer",
+                                  },
+                                  t("outlinePreviewFile"),
+                                ),
+                            ),
+                            isImg &&
+                              h("img", {
+                                src: materialHref,
+                                className: "seal-outline-preview-thumb",
+                                alt: ev.label ?? ev.ref,
+                              }),
+                            ev.renderedPages &&
+                              ev.renderedPages.length > 0 &&
+                              h(
+                                "div",
+                                { className: "seal-row" },
+                                ...ev.renderedPages.slice(0, 4).map((page, idx) =>
+                                  h("img", {
+                                    key: page,
+                                    src: `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: page })}`,
+                                    className: "seal-outline-preview-thumb",
+                                    alt: `${ev.label ?? ev.ref} · ${idx + 1}`,
+                                  }),
+                                ),
+                              ),
+                          );
+                        }),
+                        payload.kbRecords.length > 0 &&
+                          h(
+                            "div",
+                            { className: "seal-stack-sm" },
+                            h(
+                              "label",
+                              null,
+                              t("outlineBindKbLabel"),
+                              h(
+                                "select",
+                                {
+                                  value: selectedKbId,
+                                  onChange: (e: any) =>
+                                    setSelectedKbId(e.target.value),
+                                },
+                                h("option", { value: "" }, t("outlineSelectKbOption")),
+                                ...payload.kbRecords.map((rec) =>
+                                  h(
+                                    "option",
+                                    { key: rec.id, value: rec.id },
+                                    `${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""} · ${t(rec.verified ? "verified" : "unverified")}`,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            h(
+                              "button",
+                              {
+                                type: "button",
+                                className: "seal-btn-sm",
+                                disabled: !selectedKbId,
+                                onClick: () => {
+                                  const rec = payload.kbRecords.find(
+                                    (r) => r.id === selectedKbId,
+                                  );
+                                  if (!rec) return;
+                                  commitEdit(
+                                    bindEvidenceToNode(
+                                      draftOutline,
+                                      selectedRow.id,
+                                      {
+                                        source: "kb",
+                                        ref: rec.id,
+                                        ...(rec.title
+                                          ? { label: rec.title }
+                                          : {}),
+                                      },
+                                      { updatedAt: nowIso, updatedBy: "human" },
+                                    ),
+                                  );
+                                  setSelectedKbId("");
+                                },
+                              },
+                              t("outlineBindKbBtn"),
+                            ),
+                          ),
+                        h(
+                          "div",
+                          { className: "seal-stack-sm" },
+                          h("span", { className: "seal-small" }, t("outlineUploadTitle")),
+                          h(FilePicker, {
+                            label: t("outlineUploadHint"),
+                            accept:
+                              ".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.gif,.pdf,.docx,.txt,.md",
+                            allowAny: true,
+                            onFiles: setUploadFiles,
+                          }),
+                          uploadFiles.length > 0 &&
+                            h(
+                              "div",
+                              { className: "seal-chips" },
+                              ...uploadFiles.map((file, idx) =>
+                                h(
+                                  "span",
+                                  { key: `${file.path}:${idx}`, className: "seal-chip" },
+                                  h(
+                                    "span",
+                                    { className: "seal-chip-text", title: file.name },
+                                    file.name,
+                                  ),
+                                  h(
+                                    "button",
+                                    {
+                                      type: "button",
+                                      className: "seal-chip-remove",
+                                      "aria-label": file.name,
+                                      onClick: () =>
+                                        setUploadFiles((prev) =>
+                                          prev.filter((_, i) => i !== idx),
+                                        ),
+                                    },
+                                    "×",
+                                  ),
+                                ),
+                              ),
+                            ),
+                          h(
+                            "label",
+                            null,
+                            t("outlineUploadPathLabel"),
+                            h("input", {
+                              value: uploadPath,
+                              placeholder: t("outlineUploadPathPlaceholder"),
+                              onChange: (e: any) =>
+                                setUploadPath(e.target.value),
+                            }),
+                          ),
+                          h(
+                            "button",
+                            {
+                              type: "button",
+                              className: "seal-btn-primary seal-btn-sm",
+                              disabled:
+                                action.busy || uploadTargets.length === 0,
+                              onClick: () =>
+                                void handleUploadMaterial(selectedRow.id),
+                            },
+                            t("outlineUploadBtn"),
+                          ),
+                        ),
+                        h(
+                          "div",
+                          { className: "seal-row" },
+                          h("input", {
+                            id: `missing-${selectedRow.id}`,
+                            type: "checkbox",
+                            checked: Boolean(selectedRow.materialMissing),
+                            onChange: (e: any) =>
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { materialMissing: Boolean(e.target.checked) },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              ),
+                          }),
+                          h(
+                            "span",
+                            { className: "seal-small" },
+                            t("outlineMaterialMissingLabel"),
+                          ),
+                        ),
+                        h(
+                          "label",
+                          null,
+                          t("outlineMaterialNoteLabel"),
+                          h("input", {
+                            value: selectedRow.materialNote ?? "",
+                            placeholder: t("outlineMaterialNotePlaceholder"),
+                            onChange: (e: any) =>
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { materialNote: e.target.value || undefined },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              ),
+                          }),
+                        ),
+                      ),
+                      h(
+                        "div",
+                        { className: "seal-stack-sm seal-divider" },
+                        h("h3", null, t("outlineReqsSection")),
+                        allRequirements.length === 0
+                          ? h("p", { className: "seal-small" }, t("outlineReqsNone"))
+                          : h(
+                              "div",
+                              { className: "seal-outline-req-list" },
+                              ...allRequirements.map((req) => {
+                                const checked = (
+                                  selectedRow.requirementIds ?? []
+                                ).includes(req.id);
+                                const uncovered =
+                                  req.mustRespond && !coveredReqIds.has(req.id);
+                                return h(
+                                  "label",
+                                  {
+                                    key: req.id,
+                                    className: "seal-outline-req-item",
+                                  },
+                                  h("input", {
+                                    type: "checkbox",
+                                    checked,
+                                    onChange: () => {
+                                      const current =
+                                        selectedRow.requirementIds ?? [];
+                                      const nextIds = checked
+                                        ? current.filter((id) => id !== req.id)
+                                        : [...current, req.id];
+                                      commitEdit(
+                                        updateOutlineNode(
+                                          draftOutline,
+                                          selectedRow.id,
+                                          { requirementIds: nextIds },
+                                          { updatedAt: nowIso, updatedBy: "human" },
+                                        ),
+                                      );
+                                    },
+                                  }),
+                                  h(
+                                    "div",
+                                    { className: "seal-stack-sm" },
+                                    h(
+                                      "div",
+                                      { className: "seal-row" },
+                                      h("strong", { className: "seal-small" }, req.id),
+                                      req.mustRespond &&
+                                        h(
+                                          "span",
+                                          { className: "seal-badge" },
+                                          t("mustRespond"),
+                                        ),
+                                      uncovered &&
+                                        h(
+                                          "span",
+                                          { className: "seal-badge seal-badge-warn" },
+                                          t("outlineReqUncoveredTag"),
+                                        ),
+                                    ),
+                                    h("span", { className: "seal-small" }, req.text),
+                                  ),
+                                );
+                              }),
+                            ),
+                      ),
+                      h(
+                        "div",
+                        { className: "seal-stack-sm seal-divider" },
+                        h("h3", null, t("outlineAiSection")),
+                        !payload.binding?.sessionId
+                          ? h(
+                              "p",
+                              { className: "seal-small" },
+                              t("outlineNoSessionHint"),
+                            )
+                          : h(
+                              React.Fragment,
+                              null,
+                              h("textarea", {
+                                value: aiInstruction,
+                                placeholder: t("outlineAiPlaceholder"),
+                                onChange: (e: any) =>
+                                  setAiInstruction(e.target.value),
+                              }),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled:
+                                    action.busy || !aiInstruction.trim(),
+                                  onClick: () =>
+                                    action.run(async () => {
+                                      const prompt = buildOutlineRevisionPrompt(
+                                        { name: payload.project.name },
+                                        selectedRow,
+                                        aiInstruction,
+                                      );
+                                      await send(
+                                        payload.binding!.sessionId!,
+                                        prompt,
+                                      );
+                                      setAiInstruction("");
+                                    }, t("sent")),
+                                },
+                                t("outlineAiSendBtn"),
+                              ),
+                            ),
+                      ),
+                    )
+                  : h(
+                      React.Fragment,
+                      null,
+                      h("h3", null, t("outlineDetailOverview")),
+                      h("h4", { style: { margin: "4px 0" } }, t("outlineMissingOverviewTitle")),
+                      missingRows.length === 0
+                        ? h("p", { className: "seal-small" }, t("noIssues"))
+                        : missingRows.map((row) =>
+                            h(
+                              "button",
+                              {
+                                key: row.id,
+                                type: "button",
+                                className: "seal-btn-sm",
+                                style: { justifyContent: "space-between" },
+                                onClick: () => {
+                                  setActiveVolume(row.volume);
+                                  setSelectedNodeId(row.id);
+                                },
+                              },
+                              h("span", null, row.title),
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-warn" },
+                                t("outlineMatMissing"),
+                              ),
+                            ),
+                          ),
+                      h(
+                        "h4",
+                        { style: { margin: "8px 0 4px" } },
+                        t("outlineUncoveredOverviewTitle"),
+                      ),
+                      liveView.uncoveredRequirementList.length === 0
+                        ? h("p", { className: "seal-small" }, t("noIssues"))
+                        : liveView.uncoveredRequirementList.map((req) =>
+                            h(
+                              "div",
+                              {
+                                key: req.id,
+                                className: "seal-card-compact seal-stack-sm",
+                              },
+                              h("strong", { className: "seal-small" }, `${req.id} · ${req.kind}`),
+                              h("span", { className: "seal-small" }, req.text),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  onClick: () =>
+                                    addNodeHelper({
+                                      parentId: null,
+                                      level: 1,
+                                      title: req.text.slice(0, 40),
+                                      kind: "authored",
+                                      requirementIds: [req.id],
+                                    }),
+                                },
+                                t("outlineAddResponseSection"),
+                              ),
+                            ),
+                          ),
+                      h(
+                        "div",
+                        { className: "seal-stack-sm seal-divider" },
+                        h("h3", null, t("outlineAiSection")),
+                        !payload.binding?.sessionId
+                          ? h(
+                              "p",
+                              { className: "seal-small" },
+                              t("outlineNoSessionHint"),
+                            )
+                          : h(
+                              React.Fragment,
+                              null,
+                              h("textarea", {
+                                value: aiInstruction,
+                                placeholder: t("outlineAiGlobalPlaceholder"),
+                                onChange: (e: any) =>
+                                  setAiInstruction(e.target.value),
+                              }),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-sm",
+                                  disabled:
+                                    action.busy || !aiInstruction.trim(),
+                                  onClick: () =>
+                                    action.run(async () => {
+                                      const prompt = buildOutlineRevisionPrompt(
+                                        { name: payload.project.name },
+                                        null,
+                                        aiInstruction,
+                                      );
+                                      await send(
+                                        payload.binding!.sessionId!,
+                                        prompt,
+                                      );
+                                      setAiInstruction("");
+                                    }, t("sent")),
+                                },
+                                t("outlineAiSendBtn"),
+                              ),
+                            ),
+                      ),
+                    ),
+              ),
+            ),
+          );
+        }
+
         function GlobalPage() {
           const resource = useResource<Overview>(
             (signal) => api("overview", {}, signal),
@@ -4554,6 +7073,8 @@ currentWindow.__ModuleLoader__.load({
           const [tab, setTabState] = React.useState(() => {
             try {
               const saved = sessionStorage.getItem("seal:global-tab");
+              const savedProj = sessionStorage.getItem("seal:outline-project-id");
+              if (saved === "outline" && savedProj) return "outline";
               return saved === "start" || saved === "projects" || saved === "kb"
                 ? saved
                 : "start";
@@ -4561,6 +7082,43 @@ currentWindow.__ModuleLoader__.load({
               return "start";
             }
           });
+          const [outlineProjectId, setOutlineProjectId] = React.useState<
+            string | null
+          >(() => {
+            try {
+              return sessionStorage.getItem("seal:outline-project-id");
+            } catch {
+              return null;
+            }
+          });
+          const [outlineFocusNodeId, setOutlineFocusNodeId] = React.useState<
+            string | null
+          >(() => {
+            try {
+              return sessionStorage.getItem("seal:outline-focus-node");
+            } catch {
+              return null;
+            }
+          });
+          React.useEffect(() => {
+            const onOpenOutline = (event: Event) => {
+              const detail = (
+                event as CustomEvent<{
+                  projectId?: string;
+                  focusNodeId?: string;
+                }>
+              ).detail;
+              if (!detail?.projectId) return;
+              navigate(() => {
+                setOutlineProjectId(detail.projectId!);
+                setOutlineFocusNodeId(detail.focusNodeId ?? null);
+                setTab("outline");
+              });
+            };
+            window.addEventListener("seal:open-outline", onOpenOutline);
+            return () =>
+              window.removeEventListener("seal:open-outline", onOpenOutline);
+          }, []);
           const [libreOfficeDismissed, setLibreOfficeDismissed] =
             React.useState(() => {
               try {
@@ -4594,13 +7152,14 @@ currentWindow.__ModuleLoader__.load({
             overview?.environment?.libreOffice?.available === false;
           const projectCount = overview?.projects.length ?? 0;
           const vaultCount = overview?.vaults.length ?? 0;
+          const isOutlineEditor = tab === "outline" && Boolean(outlineProjectId);
           return h(
             "main",
             { className: "seal-ui seal-page" },
             h("style", null, clientStyle),
             h(
               "div",
-              { className: "seal-content" },
+              { className: isOutlineEditor ? "seal-content-wide" : "seal-content" },
               h(
                 "header",
                 { className: "seal-header" },
@@ -4699,23 +7258,33 @@ currentWindow.__ModuleLoader__.load({
               ),
               resourceStatus({ state: resource.state, reload: reloadOverview }),
               overview &&
-                (tab === "start"
-                  ? h(Start, {
-                      overview,
-                      reload: reloadOverview,
-                      onGoKnowledge: () => navigate(() => setTab("kb")),
+                (isOutlineEditor
+                  ? h(OutlineEditor, {
+                      key: outlineProjectId!,
+                      projectId: outlineProjectId!,
+                      focusNodeId: outlineFocusNodeId,
+                      onBackToProjects: () => setTab("projects"),
+                      onReloadOverview: reloadOverview,
                     })
-                  : tab === "projects"
-                    ? h(ProjectList, {
+                  : tab === "start"
+                    ? h(Start, {
                         overview,
                         reload: reloadOverview,
-                        onGoStart: () => navigate(() => setTab("start")),
+                        onGoKnowledge: () => navigate(() => setTab("kb")),
                       })
-                    : h(Knowledge, {
-                        overview,
-                        refreshTick,
-                        reload: reloadOverview,
-                      })),
+                    : tab === "projects"
+                      ? h(ProjectList, {
+                          overview,
+                          reload: reloadOverview,
+                          onGoStart: () => navigate(() => setTab("start")),
+                          onOpenOutline: (projectId: string) =>
+                            openGlobalOutlineEditor(projectId),
+                        })
+                      : h(Knowledge, {
+                          overview,
+                          refreshTick,
+                          reload: reloadOverview,
+                        })),
             ),
           );
         }

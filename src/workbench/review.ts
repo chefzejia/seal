@@ -16,6 +16,8 @@ export interface ReviewItem {
   differenceIds: string[];
   hintIds: string[];
   actions: Array<"confirm" | "accept" | "review" | "modify">;
+  nodeId?: string;
+  title?: string;
 }
 
 export interface OutlineSectionHint {
@@ -164,7 +166,14 @@ export function reviewItems(
     for (const [code, issues] of Object.entries(report.results))
       for (const [index, raw] of issues.entries()) {
         const issue = record(raw),
-          id = text(issue.id) || text(issue.name) || String(index);
+          nodeId = text(issue.nodeId),
+          title = text(issue.title),
+          id =
+            text(issue.id) ||
+            text(issue.name) ||
+            (code === "C17" && nodeId
+              ? `${nodeId}:${text(issue.kind)}:${text(issue.ref) || index}`
+              : String(index));
         if (
           code === "C05" &&
           items.some(
@@ -193,7 +202,8 @@ export function reviewItems(
             text(issue.value) ||
             text(issue.after) ||
             text(issue.text) ||
-            text(issue.hintText);
+            text(issue.hintText) ||
+            title;
         const item: ReviewItem = {
           key: `${report.draft}:${code}:${id}`,
           draft: report.draft,
@@ -216,6 +226,8 @@ export function reviewItems(
           differenceIds: ["C06", "C07"].includes(code) ? [id] : [],
           hintIds: ["C02", "C03"].includes(code) && address ? [id] : [],
           actions: [],
+          ...(nodeId ? { nodeId } : {}),
+          ...(title ? { title } : {}),
         };
         if (code === "C04" && id !== "ledger") item.actions.push("confirm");
         if (["C06", "C07"].includes(code)) item.actions.push("accept");

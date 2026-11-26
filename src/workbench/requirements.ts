@@ -171,6 +171,7 @@ export function buildBidStartupPrompt(project: {
   deadline: string;
   vaultId: string | null;
   vaultName?: string | null;
+  workflowMode?: "outline_first" | "direct";
   tenders: ReadonlyArray<{ copy: string }>;
 }): string {
   const tenders = project.tenders.map((item) => item.copy).join("、");
@@ -180,12 +181,22 @@ export function buildBidStartupPrompt(project: {
       ? `关联企业知识库：${vaultName}（ID: ${project.vaultId}；使用 seal_kb_search / seal_kb_get 检索主体与证据）。`
       : `关联企业知识库：${project.vaultId}（使用 seal_kb_search / seal_kb_get 检索主体与证据）。`
     : "当前未关联企业知识库（无库模式：事实性内容允许填写但保持待定交人核对，不得编造主体资质、业绩或数据）。";
+  const mode = project.workflowMode ?? "outline_first";
+  const stageInstruction =
+    mode === "outline_first"
+      ? [
+          "当前编制模式：先确认大纲再生成标书（outline_first）。",
+          "【阶段一目标】请先完成：读招标文件、调用 `seal_requirements(action=\"save\")` 保存要求清单、检索企业知识库预匹配证照与素材，并调用 `seal_outline(action=\"save\")` 提交结构化编制大纲草案（标明分册、固定格式与 `tenderSource.ranges`、自拟章节与关联 `requirementIds`、证明材料与已匹配 KB 记录或 `materialMissing: true`）。",
+          "提交大纲后请立即向人汇报大纲结构、评分项覆盖与待补材料清单，提示在右侧栏或全宽大纲编辑器修改、补传材料并点击「确认大纲并开始生成标书」，然后暂停等待人确认；在人确认大纲前严禁调用 `seal_doc_extract` 或 `seal_doc_edit` 编辑草稿。",
+        ].join("\n")
+      : "当前编制模式：跳过大纲直接生成（direct），请按手册直接完成读标、要求保存、分册提取、填写、撰写、挂载证据与自检交接。";
   return [
     "请先调用 `skill` 工具加载 `seal-bid` 操作手册，再严格按手册流程编写投标文件。",
     `项目名称：${project.name}`,
     `项目登记招标副本：${tenders || "见项目 tender/ 目录"}`,
     `截标日：${project.deadline}`,
     vaultNote,
-    "不要用通用文件工具改写草稿、台账、requirements.json 或知识库，也不要尝试确认待定、接受原文改动、核实资料、标记要求覆盖或导出终稿。",
+    stageInstruction,
+    "不要用通用文件工具改写草稿、台账、requirements.json、outline.json 或知识库，也不要尝试确认待定、确认大纲、接受原文改动、核实资料、标记要求覆盖或导出终稿。",
   ].join("\n");
 }

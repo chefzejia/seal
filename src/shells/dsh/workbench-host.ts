@@ -7,6 +7,7 @@ import {
   readProjectSnapshot,
   runProject,
   runProjectUnlocked,
+  writeOutlineFile,
 } from "../cli/project-v2.js";
 import { serializedProject } from "../cli/project-operations.js";
 import { runKnowledgeBase } from "../cli/kb.js";
@@ -30,6 +31,13 @@ import {
   type DraftReviewCache,
 } from "../../core/bid/human-review.js";
 import { requirementCoverageDigest } from "../../core/bid/requirements.js";
+import {
+  assertLockedTemplateTransitions,
+  confirmOutline,
+  isSafeMaterialPath,
+  validateOutlineInput,
+  type OutlineEvidenceBinding,
+} from "../../core/bid/outline.js";
 import { sealLedger } from "../../core/bid/ledger-integrity.js";
 import { finalizeDraftMarkers } from "../../core/bid/finalize.js";
 import { checkIdentity } from "../../core/bid/check.js";
@@ -55,6 +63,11 @@ import {
   type ReviewItem,
 } from "../../workbench/review.js";
 import { buildRequirementsView } from "../../workbench/requirements.js";
+import {
+  bindEvidenceToNode,
+  buildOutlineExecutionPrompt,
+  buildOutlineView,
+} from "../../workbench/outline.js";
 import {
   buildKnowledgeCatalog,
   summarizeVaultOverview,
@@ -155,6 +168,141 @@ async function itemsFor(snapshot: Snapshot): Promise<ReviewItem[]> {
   return reviewItems(snapshot.reports, blocks, outlines);
 }
 
+function outlineSummaryFor(snapshot: Snapshot) {
+  const confirmedAt = snapshot.outlineConfirmation.valid
+    ? (snapshot.ledger.outlineConfirmation?.confirmedAt ?? null)
+    : null;
+  return {
+    kind: snapshot.outline.kind,
+    ...(snapshot.outline.kind === "error"
+      ? { reason: snapshot.outline.reason }
+      : {}),
+    confirmationStatus: snapshot.outlineConfirmation.status,
+    confirmedAt,
+    ...snapshot.outlineSummary,
+  };
+}
+
+async function readBinding(root: string): Promise<unknown> {
+  try {
+    return JSON.parse(
+      await fs.readFile(
+        await regular(path.join(root, "ui-binding.json")),
+        "utf8",
+      ),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return { error: "会话关联文件无法读取，请重新关联" };
+  }
+}
+
+const OUTLINE_MATERIAL_MIMES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".docx":
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+};
+
+const ALLOWED_OUTLINE_MATERIAL_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".gif",
+  ".pdf",
+  ".docx",
+  ".txt",
+  ".md",
+]);
+
+const OUTLINE_IMAGE_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".gif",
+]);
+
+export const OUTLINE_PDF_MAX_PAGES = 200;
+
+function outlinePdfMaxPages(): number {
+  const raw = process.env.SEAL_OUTLINE_PDF_MAX_PAGES;
+  if (raw !== undefined && raw.trim() !== "") {
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      return parsed;
+    }
+  }
+  return OUTLINE_PDF_MAX_PAGES;
+}
+
+/** Verify and create directory segments one by one under physicalRoot without crossing any symlink. */
+export async function ensureContainedDirectory(
+  root: string,
+  ...segments: string[]
+): Promise<string> {
+  if (
+    segments.length === 0 ||
+    segments.some(
+      (seg) =>
+        !seg ||
+        seg === "." ||
+        seg === ".." ||
+        seg.includes("/") ||
+        seg.includes("\\") ||
+        seg.includes("\0"),
+    )
+  ) {
+    throw new Error("项目目录段名称无效");
+  }
+  const physicalRoot = await fs.realpath(root);
+  let current = physicalRoot;
+  for (const segment of segments) {
+    const candidate = path.join(current, segment);
+    let stat;
+    try {
+      stat = await fs.lstat(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await fs.mkdir(candidate);
+      stat = await fs.lstat(candidate);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`项目材料目录无效（不能为符号链接或非目录）：${segment}`);
+    }
+    const physical = await fs.realpath(candidate);
+    const rel = path.relative(physicalRoot, physical);
+    if (
+      physical !== path.join(current, segment) ||
+      !rel ||
+      rel === ".." ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel)
+    ) {
+      throw new Error(`项目材料目录越界：${segment}`);
+    }
+    current = physical;
+  }
+  return current;
+}
+
 function currentEnvironment() {
   return {
     platform: process.platform,
@@ -244,24 +392,14 @@ export class WorkbenchHost {
         const snapshot = await serializedProject(root, () =>
           readProjectSnapshot(this.host, root),
         );
-        let binding: unknown = null;
-        try {
-          binding = JSON.parse(
-            await fs.readFile(
-              await regular(path.join(root, "ui-binding.json")),
-              "utf8",
-            ),
-          );
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-            binding = { error: "会话关联文件无法读取，请重新关联" };
-        }
+        const binding = await readBinding(root);
         projects.push({
           id,
           root,
           project: snapshot.project,
           ready: snapshot.ready,
           counts: snapshot.counts,
+          outlineSummary: outlineSummaryFor(snapshot),
           binding,
         });
       } catch (error) {
@@ -330,6 +468,11 @@ export class WorkbenchHost {
     assertOutputIsolation({ directories: [root] }, { files });
     const projectName = required(input.name, "项目名称");
     const deadline = required(input.deadline, "截标日");
+    const workflowMode =
+      input.workflowMode === undefined ? "outline_first" : input.workflowMode;
+    if (workflowMode !== "outline_first" && workflowMode !== "direct") {
+      throw new Error("编制模式必须为 outline_first 或 direct");
+    }
     const kbRoot = knowledgeBasesRoot();
     assertKnowledgeBaseTree(kbRoot);
     return serializedKnowledgeBase(kbRoot, async () => {
@@ -341,6 +484,8 @@ export class WorkbenchHost {
         projectName,
         "--deadline",
         deadline,
+        "--workflow-mode",
+        workflowMode,
         ...files.flatMap((file) => ["--tender", file]),
       ];
       let vaultName: string | null = null;
@@ -460,6 +605,7 @@ export class WorkbenchHost {
         complete: snapshot.complete,
         counts: snapshot.counts,
         blockingCounts: snapshot.blockingCounts,
+        outlineSummary: outlineSummaryFor(snapshot),
         groups: reviewPage(
           items,
           input.pages as Record<string, number> | undefined,
@@ -893,6 +1039,33 @@ export class WorkbenchHost {
         type: "image/png",
       };
     }
+    if (typeof input.material === "string") {
+      if (!isSafeMaterialPath(input.material)) {
+        throw new Error("项目材料路径无效");
+      }
+      const materialsDir = path.join(root, "materials");
+      const dirStat = await fs.lstat(materialsDir);
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+        throw new Error("项目材料目录无效");
+      }
+      const materialsRoot = await fs.realpath(materialsDir);
+      const physical = await regular(path.join(root, input.material));
+      const rel = path.relative(materialsRoot, physical);
+      if (
+        !rel ||
+        rel === ".." ||
+        rel.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(rel)
+      ) {
+        throw new Error("项目材料路径越界");
+      }
+      const ext = path.extname(physical).toLowerCase();
+      return {
+        bytes: await fs.readFile(physical),
+        name: path.basename(physical),
+        type: OUTLINE_MATERIAL_MIMES[ext] ?? "application/octet-stream",
+      };
+    }
     const draft = identifier(input.draft),
       snapshot = await serializedProject(root, () =>
         readProjectSnapshot(this.host, root),
@@ -916,6 +1089,392 @@ export class WorkbenchHost {
       name: `${draft}.docx`,
       type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     };
+  }
+
+  private async readOutlineGetUnlocked(root: string, projectId: string) {
+    const snapshot = await readProjectSnapshot(this.host, root);
+    const binding = await readBinding(root);
+    const vaultName = await this.resolveVaultName(snapshot.project.vaultId);
+    const confirmedAt = snapshot.outlineConfirmation.valid
+      ? (snapshot.ledger.outlineConfirmation?.confirmedAt ?? null)
+      : null;
+    const view = buildOutlineView({
+      outlineState: snapshot.outline,
+      confirmationStatus: snapshot.outlineConfirmation.status,
+      confirmedAt,
+      requirements: snapshot.requirements,
+      kbRecords: snapshot.kbRecords,
+      materials: snapshot.materials,
+      c17Issues: snapshot.outlineResults,
+    });
+    return {
+      projectKind: "project" as const,
+      projectId,
+      project: snapshot.project,
+      vaultName,
+      revision: snapshot.revision,
+      binding,
+      outline: snapshot.outline,
+      view,
+      kbRecords: snapshot.kbRecords,
+      materials: snapshot.materials,
+      requirements: snapshot.requirements,
+    };
+  }
+
+  async outlineGet(input: Record<string, unknown>) {
+    const selected = input.projectId ?? (await this.projectForCwd(input.cwd));
+    if (!selected) return { kind: "not_project" as const };
+    const id = required(selected, "项目");
+    const root = await this.projectRoot(id);
+    return serializedProject(root, () => this.readOutlineGetUnlocked(root, id));
+  }
+
+  async outlineSave(input: Record<string, unknown>) {
+    const forbidden = [
+      "confirmed",
+      "confirmedAt",
+      "authorization",
+      "approved",
+      "lockedBy",
+      "verified",
+      "verifiedAt",
+      "verifiedFields",
+      "digest",
+      "signature",
+      "outlineConfirmation",
+    ];
+    for (const key of Object.keys(input)) {
+      if (forbidden.includes(key) || key.startsWith("__seal")) {
+        throw new Error(`大纲保存禁止传入确认、签名或核实字段：${key}`);
+      }
+    }
+    const id = identifier(input.projectId);
+    const root = await this.projectRoot(id);
+    const expectedRevision = required(
+      input.expectedRevision ?? input.revision,
+      "修订版本",
+    );
+    if (input.volumes === undefined || input.nodes === undefined) {
+      throw new Error("保存大纲必须提供 volumes 与 nodes");
+    }
+    return serializedProject(root, async () => {
+      const snapshot = await readProjectSnapshot(this.host, root);
+      if (snapshot.revision !== expectedRevision) {
+        throw new Error(
+          "版本冲突：大纲、草稿或资料已变化。当前编辑已保留，请刷新后核对。",
+        );
+      }
+      const validated = validateOutlineInput({
+        format: "seal-outline-1",
+        volumes: input.volumes,
+        nodes: input.nodes,
+        updatedAt: new Date().toISOString(),
+        updatedBy: "human",
+      });
+      if (!validated.outline) {
+        throw new Error(
+          validated.errors[0]?.reason ?? "编制大纲格式校验失败",
+        );
+      }
+      if (snapshot.outline.kind === "value") {
+        assertLockedTemplateTransitions(
+          snapshot.outline.outline,
+          validated.outline,
+        );
+      }
+      const registeredCopies = new Set(
+        snapshot.project.tenders.map((item) => item.copy),
+      );
+      for (const vol of validated.outline.volumes) {
+        if (vol.tender !== undefined && !registeredCopies.has(vol.tender)) {
+          throw new Error(
+            `分册「${vol.name}」的招标文件 ${vol.tender} 不属于项目登记招标副本`,
+          );
+        }
+      }
+      for (const node of validated.outline.nodes) {
+        if (
+          node.tenderSource &&
+          !registeredCopies.has(node.tenderSource.file)
+        ) {
+          throw new Error(
+            `节点「${node.title}」的 tenderSource.file（${node.tenderSource.file}）不属于项目登记招标副本`,
+          );
+        }
+      }
+      await writeOutlineFile(
+        this.host,
+        root,
+        snapshot.project,
+        validated.outline,
+      );
+      return this.readOutlineGetUnlocked(root, id);
+    });
+  }
+
+  async outlineUploadMaterial(input: Record<string, unknown>) {
+    const id = identifier(input.projectId);
+    const root = await this.projectRoot(id);
+    const expectedRevision = required(
+      input.expectedRevision ?? input.revision,
+      "修订版本",
+    );
+    const rawFilePath = required(input.filePath, "材料文件路径");
+    if (!path.isAbsolute(rawFilePath)) {
+      throw new Error("材料文件路径必须为本机绝对路径");
+    }
+    let stat;
+    try {
+      stat = await fs.lstat(rawFilePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`材料文件不存在：${rawFilePath}`);
+      }
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error("材料文件必须是普通文件（不支持符号链接）");
+    }
+    const physicalSource = await fs.realpath(rawFilePath);
+    assertOutputIsolation(
+      { directories: [root] },
+      { files: [rawFilePath, physicalSource] },
+    );
+
+    const ext = path.extname(rawFilePath).toLowerCase();
+    if (!ALLOWED_OUTLINE_MATERIAL_EXTS.has(ext)) {
+      throw new Error(
+        `不支持的材料文件扩展名（${ext || "无扩展名"}）；允许：.png、.jpg、.jpeg、.webp、.bmp、.tif、.tiff、.gif、.pdf、.docx、.txt、.md`,
+      );
+    }
+
+    const nodeId =
+      input.nodeId !== undefined && input.nodeId !== null && input.nodeId !== ""
+        ? required(input.nodeId, "节点编号")
+        : undefined;
+    const label =
+      typeof input.label === "string" && input.label.trim()
+        ? input.label.trim()
+        : path.basename(rawFilePath);
+
+    return serializedProject(root, async () => {
+      const snapshot = await readProjectSnapshot(this.host, root);
+      if (snapshot.revision !== expectedRevision) {
+        throw new Error(
+          "版本冲突：大纲、草稿或资料已变化。请刷新后重新上传。",
+        );
+      }
+      if (
+        nodeId &&
+        snapshot.outline.kind === "value" &&
+        !snapshot.outline.outline.nodes.some((node) => node.id === nodeId)
+      ) {
+        throw new Error(`目标大纲节点不存在：${nodeId}`);
+      }
+
+      const physicalRoot = await fs.realpath(root);
+      const outlineDir = await ensureContainedDirectory(
+        physicalRoot,
+        "materials",
+        "outline",
+      );
+      const uuid = randomUUID();
+      const base =
+        path
+          .basename(rawFilePath, ext)
+          .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 60) || "material";
+      const relRef = `materials/outline/${uuid}-${base}${ext}`;
+      const copiedPath = path.join(outlineDir, `${uuid}-${base}${ext}`);
+      const pagesDirName = `${uuid}-pages`;
+      const pagesDir = path.join(outlineDir, pagesDirName);
+      const sourceBytes = new Uint8Array(await fs.readFile(physicalSource));
+
+      await this.host.writeBytes(copiedPath, sourceBytes);
+
+      let renderedPages: string[] | undefined;
+      try {
+        if (OUTLINE_IMAGE_EXTS.has(ext)) {
+          if (!this.host.validateImage) {
+            throw new Error("宿主不支持图片校验能力");
+          }
+          await this.host.validateImage(
+            sourceBytes,
+            OUTLINE_MATERIAL_MIMES[ext],
+          );
+        } else if (ext === ".pdf") {
+          if (!this.host.extractPdf) {
+            throw new Error("宿主不支持 PDF 渲染能力");
+          }
+          const verifiedPagesDir = await ensureContainedDirectory(
+            physicalRoot,
+            "materials",
+            "outline",
+            pagesDirName,
+          );
+          const maxPages = outlinePdfMaxPages();
+          const pdfResult = await this.host.extractPdf(
+            copiedPath,
+            verifiedPagesDir,
+            {
+              dpi: 150,
+              maxPages,
+            },
+          );
+          renderedPages = pdfResult.pages
+            .map((page) => page.imagePath)
+            .filter(
+              (pagePath): pagePath is string =>
+                typeof pagePath === "string" && pagePath.length > 0,
+            )
+            .map((pagePath) =>
+              path.relative(physicalRoot, pagePath).split(path.sep).join("/"),
+            );
+          if (
+            pdfResult.truncatedPages > 0 ||
+            renderedPages.length !== pdfResult.pageCount
+          ) {
+            throw new Error(
+              `PDF 共 ${pdfResult.pageCount} 页，超过单次上传上限 ${maxPages} 页或部分页面未完整渲染（实际渲染 ${renderedPages.length} 页，截断 ${pdfResult.truncatedPages} 页）；请拆分 PDF 后重试`,
+            );
+          }
+          if (
+            renderedPages.length === 0 ||
+            renderedPages.some((page) => !isSafeMaterialPath(page))
+          ) {
+            throw new Error("PDF 未渲染出有效图片页，请确认 PDF 文件完整且非空");
+          }
+        } else if (ext === ".docx") {
+          await validatePackageStructure(sourceBytes);
+        } else if (ext === ".txt" || ext === ".md") {
+          new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
+        }
+
+        const binding: OutlineEvidenceBinding = {
+          source: "material",
+          ref: relRef,
+          label,
+          ...(renderedPages ? { renderedPages } : {}),
+        };
+
+        if (nodeId && snapshot.outline.kind === "value") {
+          const nextOutline = bindEvidenceToNode(
+            snapshot.outline.outline,
+            nodeId,
+            binding,
+            {
+              updatedAt: new Date().toISOString(),
+              updatedBy: "human",
+            },
+          );
+          await writeOutlineFile(
+            this.host,
+            root,
+            snapshot.project,
+            nextOutline,
+          );
+        }
+
+        const refreshed = await this.readOutlineGetUnlocked(root, id);
+        return { ...refreshed, sessionBinding: refreshed.binding, binding };
+      } catch (error) {
+        await fs.rm(copiedPath, { force: true }).catch(() => {});
+        await fs.rm(pagesDir, { recursive: true, force: true }).catch(() => {});
+        throw new Error(
+          `材料上传失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
+
+  async outlineConfirm(input: Record<string, unknown>) {
+    const forbidden = [
+      "digest",
+      "signature",
+      "authorization",
+      "confirmed",
+      "confirmedAt",
+      "approved",
+      "verified",
+      "verifiedFields",
+    ];
+    for (const key of Object.keys(input)) {
+      if (forbidden.includes(key) || key.startsWith("__seal")) {
+        throw new Error(
+          "大纲确认只能由宿主读取已保存大纲签名，客户端不得传入摘要、签名或确认字段",
+        );
+      }
+    }
+    const id = identifier(input.projectId);
+    const root = await this.projectRoot(id);
+    const expectedRevision = required(
+      input.expectedRevision ?? input.revision,
+      "修订版本",
+    );
+    return serializedProject(root, async () => {
+      const snapshot = await readProjectSnapshot(this.host, root);
+      if (snapshot.revision !== expectedRevision) {
+        throw new Error(
+          "版本冲突：大纲、草稿或资料已变化。请刷新后重新核对并确认。",
+        );
+      }
+      if (!snapshot.secret || !snapshot.ledger.integrity) {
+        throw new Error("台账或授权密钥无法核验");
+      }
+      if (snapshot.outline.kind !== "value") {
+        throw new Error("编制大纲尚未建立或格式无效，无法确认");
+      }
+      const outlineDoc = snapshot.outline.outline;
+      if (!outlineDoc.nodes.some((node) => node.included)) {
+        throw new Error("编制大纲至少需要保留 1 个启用章节，才能确认");
+      }
+      const ledger = structuredClone(snapshot.ledger);
+      const confirmedAt = new Date().toISOString();
+      const confirmation = await confirmOutline(
+        ledger,
+        outlineDoc,
+        {
+          root,
+          vaultId: snapshot.project.vaultId,
+          deadline: snapshot.project.deadline,
+        },
+        snapshot.secret,
+        confirmedAt,
+      );
+      await sealLedger(ledger, root, snapshot.secret);
+      await this.host.writeFiles!([
+        {
+          path: path.join(root, "ledger.json"),
+          data: encoder.encode(JSON.stringify(ledger, null, 2)),
+        },
+        {
+          path: snapshot.anchor.path,
+          data: encoder.encode(JSON.stringify(ledger.integrity)),
+        },
+      ]);
+      const vaultName = await this.resolveVaultName(snapshot.project.vaultId);
+      const prompt = buildOutlineExecutionPrompt(
+        {
+          name: snapshot.project.name,
+          deadline: snapshot.project.deadline,
+          vaultId: snapshot.project.vaultId,
+          vaultName,
+        },
+        outlineDoc,
+        {
+          digest: confirmation.digest,
+          confirmedAt: confirmation.confirmedAt,
+        },
+      );
+      return {
+        confirmed: true,
+        digest: confirmation.digest,
+        confirmedAt: confirmation.confirmedAt,
+        prompt,
+      };
+    });
   }
 
   private async listVaultMaterials(kb: KnowledgeBase, vaultId: string) {
@@ -1318,6 +1877,11 @@ export function registerWorkbenchRoutes(
           kb: (input) => service.kb(input),
           requirements: (input) => service.requirements(input),
           cover: (input) => service.cover(input),
+          outline_get: (input) => service.outlineGet(input),
+          outline_save: (input) => service.outlineSave(input),
+          outline_upload_material: (input) =>
+            service.outlineUploadMaterial(input),
+          outline_confirm: (input) => service.outlineConfirm(input),
         };
         if (!handlers[operation]) throw new Error("操作不存在");
         return json(await handlers[operation](body));

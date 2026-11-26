@@ -335,7 +335,7 @@ export function registerProjectTools(ctx: ToolContext, host: HostPort): void {
           group: {
             type: "string",
             enum: [...CHECK_CODES],
-            description: "仅返回某项检查分组（C01–C16）。",
+            description: "仅返回某项检查分组（C01–C17）。",
           },
           offset: {
             type: "integer",
@@ -470,6 +470,161 @@ export function registerProjectTools(ctx: ToolContext, host: HostPort): void {
             options.push("--offset", String(args.offset));
           if (args.limit !== undefined)
             options.push("--limit", String(args.limit));
+          return { json: JSON.stringify(await runProject(host, options)) };
+        },
+      }),
+    ),
+  );
+  ctx.effect(() =>
+    ctx.tools.register(
+      defineTool({
+        name: "seal_outline",
+        description:
+          "读取、保存或增量修订项目编制大纲蓝图（outline.json）；返回当前大纲、确认状态、统计摘要与项目 materials/ 可用材料清单，大纲确认仅限工作台操作。",
+        parameters: {
+          project: projectParameter,
+          action: {
+            type: "string",
+            enum: ["get", "save", "patch"],
+            required: true,
+            description:
+              "操作：get 只读获取大纲与材料清单；save 全量校验并写入；patch 增量增删改节点或分册；禁传确认或核实字段。",
+          },
+          volumes: {
+            type: "array",
+            items: { type: "json" },
+            description:
+              "action=save 必填，分册规划数组 [{ name, tender?, ranges?, note? }]。",
+          },
+          nodes: {
+            type: "array",
+            items: { type: "json" },
+            description:
+              "action=save 必填，树节点数组（含 id、volume、parentId、level、title、kind、included，可选 number、optional、lockedTemplate、tenderSource、requirementIds、evidence、materialMissing、materialNote、note、expectedHeading）。",
+          },
+          upsertNodes: {
+            type: "array",
+            items: { type: "json" },
+            description: "action=patch 可选，按 id 新增或更新节点数组。",
+          },
+          removeNodeIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "action=patch 可选，待删除节点 id 数组（连同子树删除；受非可选 lockedTemplate 保护）。",
+          },
+          updateVolumes: {
+            type: "array",
+            items: { type: "json" },
+            description: "action=patch 可选，新增或更新分册配置数组。",
+          },
+        },
+        output,
+        async execute(
+          args: Common & {
+            action: string;
+            volumes?: unknown[];
+            nodes?: unknown[];
+            upsertNodes?: unknown[];
+            removeNodeIds?: string[];
+            updateVolumes?: unknown[];
+          },
+          exec,
+        ) {
+          const project = await root(ctx, args, exec);
+          if (
+            args.action !== "get" &&
+            args.action !== "save" &&
+            args.action !== "patch"
+          ) {
+            throw new Error(
+              "action 必须为 get、save 或 patch；确认大纲仅限工作台人工操作。",
+            );
+          }
+          if (args.action === "get") {
+            if (
+              args.volumes !== undefined ||
+              args.nodes !== undefined ||
+              args.upsertNodes !== undefined ||
+              args.removeNodeIds !== undefined ||
+              args.updateVolumes !== undefined
+            ) {
+              throw new Error("action=get 为只读，不接受保存或修改参数。");
+            }
+            return {
+              json: JSON.stringify(
+                await runProject(host, [
+                  "outline",
+                  "--project",
+                  project,
+                  "--action",
+                  "get",
+                ]),
+              ),
+            };
+          }
+          if (args.action === "save") {
+            if (args.volumes === undefined || args.nodes === undefined) {
+              throw new Error("action=save 必须同时提供 volumes 与 nodes 数组。");
+            }
+            if (
+              args.upsertNodes !== undefined ||
+              args.removeNodeIds !== undefined ||
+              args.updateVolumes !== undefined
+            ) {
+              throw new Error(
+                "action=save 不接受 upsertNodes、removeNodeIds 或 updateVolumes；增量修改请改用 action=patch。",
+              );
+            }
+            return {
+              json: JSON.stringify(
+                await runProject(host, [
+                  "outline",
+                  "--project",
+                  project,
+                  "--action",
+                  "save",
+                  "--volumes",
+                  JSON.stringify(args.volumes),
+                  "--nodes",
+                  JSON.stringify(args.nodes),
+                ]),
+              ),
+            };
+          }
+          if (args.volumes !== undefined || args.nodes !== undefined) {
+            throw new Error(
+              "action=patch 不接受 volumes 或 nodes；全量替换请改用 action=save。",
+            );
+          }
+          if (
+            args.upsertNodes === undefined &&
+            args.removeNodeIds === undefined &&
+            args.updateVolumes === undefined
+          ) {
+            throw new Error(
+              "action=patch 至少需提供 upsertNodes、removeNodeIds 或 updateVolumes 之一。",
+            );
+          }
+          const options = [
+            "outline",
+            "--project",
+            project,
+            "--action",
+            "patch",
+          ];
+          if (args.upsertNodes !== undefined) {
+            options.push("--upsert-nodes", JSON.stringify(args.upsertNodes));
+          }
+          if (args.removeNodeIds !== undefined) {
+            options.push(
+              "--remove-node-ids",
+              JSON.stringify(args.removeNodeIds),
+            );
+          }
+          if (args.updateVolumes !== undefined) {
+            options.push("--update-volumes", JSON.stringify(args.updateVolumes));
+          }
           return { json: JSON.stringify(await runProject(host, options)) };
         },
       }),

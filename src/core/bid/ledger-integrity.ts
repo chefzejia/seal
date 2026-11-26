@@ -1,6 +1,6 @@
 import { sha256Hex } from '../docx/zip.js';
 import type { BidLedger } from './project.js';
-import { signAuthorization } from './authorization.js';
+import { isCurrentAuthorization, signAuthorization } from './authorization.js';
 
 function canonical(value: unknown): string {
   const normalize = (item: unknown): unknown => {
@@ -68,4 +68,28 @@ export async function acknowledgeLedgerRecovery(ledger: BidLedger, root: string,
   const incident = ledger.integrityIncident;
   if (!incident || !note.trim()) throw new Error('恢复台账时必须填写核对说明');
   incident.resolution = { note, authorization: await signAuthorization(secret, { kind: 'recover', project: root, item: 'ledger', fingerprint: incidentFingerprint(incident, note) }) };
+}
+
+/** Return true when ledger.integrityIncident exists and lacks a valid current recovery authorization. */
+export async function hasUnresolvedLedgerIncident(
+  ledger: BidLedger,
+  root: string,
+  secret: Uint8Array | null,
+): Promise<boolean> {
+  const incident = ledger.integrityIncident;
+  if (!incident) return false;
+  const resolution = incident.resolution as
+    | { note?: unknown; authorization?: unknown }
+    | undefined;
+  const note = typeof resolution?.note === 'string' ? resolution.note : '';
+  const valid =
+    !!secret &&
+    !!note.trim() &&
+    (await isCurrentAuthorization(secret, resolution?.authorization, {
+      kind: 'recover',
+      project: root,
+      item: 'ledger',
+      fingerprint: incidentFingerprint(incident, note),
+    }));
+  return !valid;
 }

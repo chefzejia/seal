@@ -4,18 +4,19 @@ import { runProject } from './project-v2.js';
 import { kbHelpText, runKnowledgeBase } from './kb.js';
 
 const HELP_FLAGS = new Set(['--help', '-h', 'help']);
-const PROJECT_COMMANDS = new Set(['read', 'extract', 'edit', 'check', 'requirements']);
+const PROJECT_COMMANDS = new Set(['read', 'extract', 'edit', 'check', 'requirements', 'outline']);
 const KB_COMMANDS = new Set(['init', 'search', 'get', 'save', 'ingest', 'health']);
 
 export function cliHelpText(): string {
   return [
     'Seal 命令行用法:',
-    '  seal project init --root <项目目录> --name <名称> --deadline <YYYY-MM-DD> [--vault <知识库ID>] --tender <文件>...',
+    '  seal project init --root <项目目录> --name <名称> --deadline <YYYY-MM-DD> [--vault <知识库ID>] [--workflow-mode <outline_first|direct>] --tender <文件>...',
     '  seal read --project <目录> --file <分册或路径> --mode <outline|blocks|search> [--from <地址>] [--query <关键词>] [--limit <N>] [--max-chars <N>] [--cursor <JSON>]',
     '  seal extract --project <目录> --tender <副本路径> --draft <分册名> --ranges <JSON区间数组>',
     '  seal edit --project <目录> --draft <分册名> --ops <JSON操作数组>',
     '  seal check --project <目录> [--draft <分册名>] [--group <代码>] [--offset <N>] [--limit <N>]',
     '  seal requirements --project <目录> --action <get|save|check> [--items <JSON数组>] [--offset <N>] [--limit <N>]',
+    '  seal outline --project <目录> --action <get|save|patch> [--volumes <JSON数组>] [--nodes <JSON数组>] [--upsert-nodes <JSON数组>] [--remove-node-ids <JSON数组>] [--update-volumes <JSON数组>]',
     '  seal kb <init|search|get|save|ingest|health> [选项...]',
     '  seal --help | -h | help',
     '  seal kb --help | -h | help',
@@ -55,7 +56,7 @@ async function main(args: string[]): Promise<void> {
     console.log(JSON.stringify(await runKnowledgeBase(host, rest), null, 2));
     return;
   }
-  throw new Error('支持的命令：project init、read、extract、edit、check、requirements、kb search|get|save|ingest');
+  throw new Error('支持的命令：project init、read、extract、edit、check、requirements、outline、kb search|get|save|ingest');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

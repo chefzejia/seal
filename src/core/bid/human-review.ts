@@ -6,6 +6,7 @@ import { signAuthorization } from './authorization.js';
 import { currentHints, dismissalFingerprint, dismissalId, sameHint, type DismissalRecord } from './dismissals.js';
 import { pendingFingerprint } from './pending-fingerprint.js';
 import type { BidLedger } from './project.js';
+export { confirmOutline, type OutlineConfirmation } from './outline.js';
 
 export interface ReviewContext { root: string; vaultId: string | null; deadline: string }
 export interface AcceptedChange { draft: string; id: string; authorization: unknown }

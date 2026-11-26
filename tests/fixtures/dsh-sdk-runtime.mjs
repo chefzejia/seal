@@ -49,7 +49,7 @@ const original = fs.readFileSync(source);
 const project = path.join(sandbox, 'explicit-project');
 const agentProject = path.join(sandbox, 'agent-project');
 const signal = new AbortController().signal;
-const expectedSealTools = ['seal_check', 'seal_doc_edit', 'seal_doc_extract', 'seal_doc_read', 'seal_kb_get', 'seal_kb_ingest', 'seal_kb_save', 'seal_kb_search', 'seal_requirements'];
+const expectedSealTools = ['seal_check', 'seal_doc_edit', 'seal_doc_extract', 'seal_doc_read', 'seal_kb_get', 'seal_kb_ingest', 'seal_kb_save', 'seal_kb_search', 'seal_outline', 'seal_requirements'];
 const expectedTools = [...expectedSealTools, 'skill'].sort();
 const invoke = async (name, args, agent) => {
   const id = `seal-sdk-${randomUUID()}`;
@@ -1073,6 +1073,35 @@ try {
     await failure('seal_kb_save', {
       vaultId: m37Vault, action: 'dismiss_candidates', ids: ['candidate-b'], fields: { verified: true },
     }, /不能设置核实字段/);
+
+    // 7. seal_outline get/save/patch and privilege guard
+    const outlineMissing = await success('seal_outline', { project: m37Project, action: 'get' });
+    assert.equal(outlineMissing.kind, 'missing');
+    const outlineSaved = await success('seal_outline', {
+      project: m37Project,
+      action: 'save',
+      volumes: [{ name: '商务' }],
+      nodes: [{ id: 'n-tpl', volume: '商务', parentId: null, level: 1, title: '投标文件格式', kind: 'template', included: true, lockedTemplate: true }],
+    });
+    assert.equal(outlineSaved.saved, true);
+    const outlinePatched = await success('seal_outline', {
+      project: m37Project,
+      action: 'patch',
+      upsertNodes: [{ id: 'n-auth', volume: '商务', parentId: null, level: 1, title: '补充说明', kind: 'authored', included: true }],
+    });
+    assert.equal(outlinePatched.patched, true);
+    assert.equal(outlinePatched.summary.totalNodes, 2);
+    const outlineGot = await success('seal_outline', { project: m37Project, action: 'get' });
+    assert.equal(outlineGot.kind, 'value');
+    assert.equal(outlineGot.confirmationStatus, 'unconfirmed');
+    await failure('seal_outline', { project: m37Project, action: 'confirm' }, /INVALID_ARGS|get|save|patch/);
+    await failure('seal_outline', {
+      project: m37Project,
+      action: 'patch',
+      upsertNodes: [{ id: 'n-bad', volume: '商务', parentId: null, level: 1, title: '越权', kind: 'authored', included: true, confirmed: true }],
+    }, /confirmed|禁止/);
+    const c17Report = await success('seal_check', { project: m37Project, draft: '商务', group: 'C17' });
+    assert.ok(Array.isArray(c17Report.results.C17));
   });
   await test('plugin disposal removes its real tool and skill registrations', async () => {
     await plugin.dispose();

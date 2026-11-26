@@ -8,13 +8,16 @@ import { sealLedger } from './ledger-integrity.js';
 import type { DismissalRecord } from './dismissals.js';
 import type { PendingReason, PendingCategory } from './policy.js';
 import type { FactSource } from './facts.js';
+import type { OutlineConfirmation } from './outline.js';
 
+export type WorkflowMode = 'outline_first' | 'direct';
 export interface ProjectDocument { original: string; copy: string; sha256: string; sourceSha256: string; sourceCopy?: string; }
 export interface ProjectMetadata {
   format: 'seal-project-1';
   name: string;
   deadline: string;
   vaultId: string | null;
+  workflowMode?: WorkflowMode;
   tenders: ProjectDocument[];
   drafts: string[];
   createdAt: string;
@@ -26,6 +29,7 @@ export interface ProjectLedger {
   dismissals: DismissalRecord[];
   acceptedChanges: unknown[];
   requirements: unknown[];
+  outlineConfirmation?: OutlineConfirmation;
   drafts: Record<string, string>;
   bases?: Record<string, string>;
   tenders?: Record<string, string>;
@@ -45,9 +49,12 @@ function validDate(date: string): boolean {
 
 /** Initialize a new project directory with copies, never writes to a source path. */
 export async function initializeProject(host: HostPort, root: string, options: {
-  name: string; deadline: string; vaultId?: string | null; tenders: readonly string[]; createdAt: string;
+  name: string; deadline: string; vaultId?: string | null; workflowMode?: WorkflowMode; tenders: readonly string[]; createdAt: string;
 }): Promise<ProjectMetadata> {
   if (!options.name.trim() || !validDate(options.deadline) || !options.tenders.length) throw new Error('项目名称、有效截标日和招标文件均为必填');
+  if (options.workflowMode !== undefined && options.workflowMode !== 'outline_first' && options.workflowMode !== 'direct') {
+    throw new Error('编制模式必须为 outline_first 或 direct');
+  }
   if (!host.makeDirectory) throw new Error('宿主不支持创建项目目录');
   if (!host.authorizationKey || !host.ledgerAnchorPath) throw new Error('宿主不支持台账密钥与锚点');
   if ((await host.stat(root)).exists) throw new Error('项目目录已存在，请选择新目录');
@@ -83,7 +90,16 @@ export async function initializeProject(host: HostPort, root: string, options: {
     await host.writeBytes(host.joinPath(root, copy), data);
     tenderPaths.push({ original: options.tenders[index], copy, sha256: sha256Hex(data), sourceSha256: sha256Hex(sourceBytes[index]), ...(sourceCopy ? { sourceCopy } : {}) });
   }
-  const project: ProjectMetadata = { format: 'seal-project-1', name: options.name, deadline: options.deadline, vaultId: options.vaultId ?? null, tenders: tenderPaths, drafts: [], createdAt: options.createdAt };
+  const project: ProjectMetadata = {
+    format: 'seal-project-1',
+    name: options.name,
+    deadline: options.deadline,
+    vaultId: options.vaultId ?? null,
+    ...(options.workflowMode !== undefined ? { workflowMode: options.workflowMode } : {}),
+    tenders: tenderPaths,
+    drafts: [],
+    createdAt: options.createdAt,
+  };
   const ledger: ProjectLedger = { format: 'seal-ledger-1', fills: [], pending: [], dismissals: [], acceptedChanges: [], requirements: [], drafts: {}, bases: {}, tenders: Object.fromEntries(tenderPaths.map(item => [item.copy, item.sha256])) };
   const key = await host.authorizationKey(true);
   if (!key) throw new Error('无法创建台账密钥');
@@ -99,6 +115,7 @@ export async function readProject(host: HostPort, root: string): Promise<Project
   if (!project || typeof project !== 'object') throw new Error('项目信息无效');
   const value = project as Partial<ProjectMetadata>;
   if (value.format !== 'seal-project-1' || typeof value.name !== 'string' || typeof value.deadline !== 'string' || !validDate(value.deadline) || !Array.isArray(value.tenders) || !Array.isArray(value.drafts)) throw new Error('项目信息无效');
+  if (value.workflowMode !== undefined && value.workflowMode !== 'outline_first' && value.workflowMode !== 'direct') throw new Error('项目信息无效');
   return value as ProjectMetadata;
 }
 

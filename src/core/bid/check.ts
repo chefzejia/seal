@@ -27,7 +27,7 @@ import {
   type ReviewContext,
 } from "./human-review.js";
 import type { BidLedger, PendingRecord, ProjectMetadata } from "./project.js";
-import { incidentFingerprint, resolveLedger } from "./ledger-integrity.js";
+import { hasUnresolvedLedgerIncident, resolveLedger } from "./ledger-integrity.js";
 import { auditImageLayout } from "../docx/layout.js";
 import { checkMoney } from "./money.js";
 import { emptyResults, type DraftCheckReport } from "./report.js";
@@ -197,6 +197,7 @@ export async function checkDraft(
     };
     identityError?: string;
     requirements?: { C12: unknown[]; C14: unknown[] };
+    outline?: { C17: unknown[]; invalidAuthorization?: { item: string; reason: string } };
     requirementsState?: RequirementsState;
     knownDrafts?: readonly string[];
     includeOrphanCoverage?: boolean;
@@ -255,26 +256,14 @@ export async function checkDraft(
     > = [],
     invalidAuthorizations: Array<{ reason: string; item: string }> = [];
   const confirmed = new Set<string>();
-  let unresolvedIncident = false;
   const incident = ledger.integrityIncident;
-  if (incident) {
-    const resolution = incident.resolution as
-      | { note?: unknown; authorization?: unknown }
-      | undefined;
-    const note = typeof resolution?.note === "string" ? resolution.note : "";
-    const valid =
-      !!secret &&
-      !!note.trim() &&
-      (await isCurrentAuthorization(secret, resolution?.authorization, {
-        kind: "recover",
-        project: root,
-        item: "ledger",
-        fingerprint: incidentFingerprint(incident, note),
-      }));
-    if (!valid) {
-      unresolvedIncident = true;
-      invalidAuthorizations.push({ item: "ledger", reason: incident.reason });
-    }
+  const unresolvedIncident = await hasUnresolvedLedgerIncident(
+    ledger,
+    root,
+    secret,
+  );
+  if (unresolvedIncident && incident) {
+    invalidAuthorizations.push({ item: "ledger", reason: incident.reason });
   }
   let bodyNodes: ReturnType<typeof bodyViewNodes> | undefined;
   for (const item of ledger.pending.filter((entry) => entry.draft === name)) {
@@ -489,6 +478,9 @@ export async function checkDraft(
       : {}),
   });
   invalidAuthorizations.push(...coverageEvaluation.invalidAuthorizations);
+  if (input.outline?.invalidAuthorization) {
+    invalidAuthorizations.push(input.outline.invalidAuthorization);
+  }
   const readonlyHints = readOnlyHints(parts);
   const identityIssues: Array<{
     address: string;
@@ -550,6 +542,7 @@ export async function checkDraft(
         xml,
         decoder.decode(parts.get("word/styles.xml") ?? new Uint8Array()),
       ),
+      C17: input.outline?.C17 ?? [],
       C15: [
         ...(!baseValid
           ? [{ reason: "分册基准与已封印摘要不一致或摘要缺失" }]

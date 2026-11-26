@@ -1,5 +1,5 @@
 export interface AuthorizationPayload {
-  kind: 'confirm' | 'accept' | 'acknowledge' | 'dismiss' | 'coverage' | 'recover' | 'pending_removed';
+  kind: 'confirm' | 'accept' | 'acknowledge' | 'dismiss' | 'coverage' | 'recover' | 'pending_removed' | 'outline_confirm';
   project: string;
   item: string;
   fingerprint: string;
@@ -26,7 +26,7 @@ export async function verifyAuthorization(secret: Uint8Array, value: unknown): P
   const record = value as Partial<SignedAuthorization>;
   if (typeof record.signature !== 'string' || !/^[0-9a-f]{64}$/.test(record.signature) || !record.payload || typeof record.payload !== 'object') return false;
   const payload = record.payload;
-  if (!['confirm', 'accept', 'acknowledge', 'dismiss', 'coverage', 'recover', 'pending_removed'].includes(payload.kind) ||
+  if (!['confirm', 'accept', 'acknowledge', 'dismiss', 'coverage', 'recover', 'pending_removed', 'outline_confirm'].includes(payload.kind) ||
       [payload.project, payload.item, payload.fingerprint].some(field => typeof field !== 'string' || field.length === 0)) return false;
   const signature = Uint8Array.from(record.signature.match(/../g)!, byte => Number.parseInt(byte, 16));
   return crypto.subtle.verify('HMAC', await hmacKey(secret), signature as unknown as BufferSource, bytes(payload) as unknown as BufferSource);
