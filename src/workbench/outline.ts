@@ -25,6 +25,11 @@ export interface OutlineKbRecordSummary {
   validity?: "valid" | "expiring_soon" | "expired" | "unknown" | "not_applicable";
   subject?: "self" | "third_party" | "forbidden" | "mismatch" | "unknown";
   hasFiles?: boolean;
+  files?: string[];
+  holder?: string;
+  validUntil?: string;
+  number?: string;
+  revision?: string;
 }
 
 export interface ResolvedOutlineEvidence extends OutlineEvidenceBinding {
@@ -32,6 +37,14 @@ export interface ResolvedOutlineEvidence extends OutlineEvidenceBinding {
   title?: string;
   type?: string;
   hasFiles?: boolean;
+  kbFiles?: string[];
+  kbHolder?: string;
+  kbValidUntil?: string;
+  kbNumber?: string;
+  kbRevision?: string;
+  kbVerified?: boolean;
+  kbValidity?: OutlineKbRecordSummary["validity"];
+  kbSubject?: OutlineKbRecordSummary["subject"];
 }
 
 export interface OutlineRowView extends OutlineNode {
@@ -268,6 +281,19 @@ export function buildOutlineView(input: {
           if (!rec) {
             return { ...binding, status: "missing" };
           }
+          const kbMeta = {
+            title: rec.title,
+            type: rec.type,
+            hasFiles: rec.hasFiles,
+            ...(rec.files ? { kbFiles: rec.files } : {}),
+            ...(rec.holder ? { kbHolder: rec.holder } : {}),
+            ...(rec.validUntil ? { kbValidUntil: rec.validUntil } : {}),
+            ...(rec.number ? { kbNumber: rec.number } : {}),
+            ...(rec.revision ? { kbRevision: rec.revision } : {}),
+            kbVerified: rec.verified,
+            kbValidity: rec.validity,
+            kbSubject: rec.subject,
+          };
           if (
             rec.validity === "expired" ||
             rec.subject === "forbidden" ||
@@ -276,9 +302,7 @@ export function buildOutlineView(input: {
             return {
               ...binding,
               status: "invalid",
-              title: rec.title,
-              type: rec.type,
-              hasFiles: rec.hasFiles,
+              ...kbMeta,
             };
           }
           if (
@@ -289,17 +313,13 @@ export function buildOutlineView(input: {
             return {
               ...binding,
               status: "unverified",
-              title: rec.title,
-              type: rec.type,
-              hasFiles: rec.hasFiles,
+              ...kbMeta,
             };
           }
           return {
             ...binding,
             status: "ready",
-            title: rec.title,
-            type: rec.type,
-            hasFiles: rec.hasFiles,
+            ...kbMeta,
           };
         }
 

@@ -875,7 +875,7 @@ export const clientStyle = `
 }
 .seal-outline-grid {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 340px;
+  grid-template-columns: 230px minmax(0, 1fr) 380px;
   gap: 14px;
   align-items: start;
   min-width: 0;
@@ -1015,29 +1015,148 @@ export const clientStyle = `
   overflow-y: auto;
   min-width: 0;
 }
-.seal-outline-req-item {
+.seal-ui label.seal-outline-req-item {
   display: flex;
+  flex-direction: row;
   align-items: flex-start;
   gap: 8px;
-  padding: 7px 9px;
+  padding: 8px 10px;
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
   border: 1px solid var(--seal-border-soft);
   cursor: pointer;
   min-width: 0;
 }
-.seal-outline-req-item input[type="checkbox"] {
-  margin-top: 3px;
+.seal-ui label.seal-outline-req-item:hover {
+  border-color: var(--dsw-alias-border-l3);
+}
+.seal-ui label.seal-outline-req-item input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0 0;
   flex: 0 0 auto;
 }
+.seal-ui label.seal-inline-check {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--dsw-alias-label-primary);
+}
+.seal-ui label.seal-inline-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0 0;
+  flex: 0 0 auto;
+}
+.seal-outline-req-chip {
+  display: grid;
+  gap: 4px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--seal-border-soft);
+  min-width: 0;
+}
+.seal-outline-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.seal-ui button.seal-outline-thumb-btn {
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-base);
+  overflow: hidden;
+  cursor: zoom-in;
+  position: relative;
+  display: block;
+}
+.seal-ui button.seal-outline-thumb-btn:hover {
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-business-primary) 28%, transparent);
+}
 .seal-outline-preview-thumb {
-  width: 72px;
-  height: 92px;
+  width: 84px;
+  height: 106px;
   object-fit: cover;
   border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l3);
   background: var(--dsw-alias-bg-base);
   display: block;
+}
+.seal-outline-verify-bar {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-base));
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 24%, var(--seal-border-soft));
+}
+.seal-outline-kb-form {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--seal-border-soft);
+}
+.seal-outline-details {
+  border-top: 1px solid var(--seal-border-soft);
+  padding-top: 8px;
+}
+.seal-outline-details summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-secondary);
+  user-select: none;
+}
+.seal-outline-details[open] summary {
+  margin-bottom: 8px;
+}
+.seal-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.seal-lightbox-dialog {
+  max-width: min(92vw, 960px);
+  max-height: 90vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--seal-surface);
+  border: 1px solid var(--dsw-alias-border-l3);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+.seal-lightbox-body {
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  max-height: calc(90vh - 90px);
+}
+.seal-lightbox-img {
+  max-width: 100%;
+  max-height: calc(90vh - 100px);
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
+}
+.seal-outline-lock-icon {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  flex: 0 0 auto;
 }
 @media (max-width: 1120px) {
   .seal-outline-grid {

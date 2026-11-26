@@ -1281,3 +1281,188 @@ test("WorkbenchHost.projectStamp tracks outline/requirements/draft changes lock-
   assert.equal(out2.projectKind, "project");
   assert.equal(out2.projectStamp, stamp2.stamp);
 });
+
+test("Outline editor KB loop: kbFiles/metadata exposure, outline_verify_kb, upload saveToKb (PNG + PDF), and promote_material_to_kb", async (t) => {
+  const sandbox = await createSandbox(t, "m42-kb-loop-");
+  const host = new NodeHostPort();
+  const service = new WorkbenchHost(host);
+
+  const kbRoot = path.join(sandbox, "seal-home", "vaults");
+  await fs.mkdir(kbRoot, { recursive: true });
+  const kb = new KnowledgeBase(host, kbRoot);
+  const vault = await kb.createVault({ name: "闭环测试企业库", vaultId: "v-kb-loop" });
+  await kb.save(vault.vaultId, {
+    action: "update",
+    kind: "subject",
+    fields: { legalName: "合成测试企业有限公司" },
+  });
+  // Create an UNVERIFIED KB record with an attached PNG
+  const unverifiedRec = await kb.save(vault.vaultId, {
+    action: "create",
+    kind: "record",
+    fields: {
+      type: "营业执照",
+      title: "营业执照副本",
+      holder: "合成测试企业有限公司",
+      validUntil: "长期",
+      number: "91110000123456789A",
+    },
+    body: "",
+  });
+  await kb.save(vault.vaultId, {
+    action: "attach_file",
+    kind: "record",
+    id: unverifiedRec.id,
+    file: { fileName: "license.png", bytes: PNG_1X1_RED },
+  });
+
+  const tenderPath = path.join(sandbox, "tender.docx");
+  await fs.writeFile(
+    tenderPath,
+    await buildDocx([p("一、企业证照"), p("二、补充资质"), p("三、专项材料")].join("")),
+  );
+  const created = await service.create({
+    name: "知识库双向同步测试",
+    deadline: "2028-06-01",
+    vaultId: vault.vaultId,
+    files: [tenderPath],
+    workflowMode: "outline_first",
+  });
+
+  // Save outline with 3 nodes: one bound to unverified KB record, two missing materials
+  let state = (await service.outlineGet({ projectId: created.id })) as any;
+  state = await service.outlineSave({
+    projectId: created.id,
+    expectedRevision: state.revision,
+    volumes: [{ name: "商务标", tender: "tender/1.docx", ranges: [{ from: "p:0", to: "p:2" }] }],
+    nodes: [
+      {
+        id: "n-kb",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "企业营业执照",
+        kind: "attachment",
+        included: true,
+        evidence: [{ source: "kb", ref: unverifiedRec.id, label: "营业执照副本" }],
+      },
+      {
+        id: "n-upload-pdf",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "新补资质PDF",
+        kind: "attachment",
+        included: true,
+        materialMissing: true,
+      },
+      {
+        id: "n-promote-png",
+        volume: "商务标",
+        parentId: null,
+        level: 1,
+        title: "先本地后入库图片",
+        kind: "attachment",
+        included: true,
+        materialMissing: true,
+      },
+    ],
+  });
+
+  // 1. Verify kbFiles & metadata are exposed on resolvedEvidence and kbRecords
+  const kbRow = state.view.rows.find((r: any) => r.id === "n-kb");
+  assert.equal(kbRow.resolvedMaterialStatus, "needs_review");
+  assert.equal(kbRow.resolvedEvidence[0].status, "unverified");
+  assert.equal(kbRow.resolvedEvidence[0].kbVerified, false);
+  assert.equal(kbRow.resolvedEvidence[0].kbHolder, "合成测试企业有限公司");
+  assert.equal(kbRow.resolvedEvidence[0].kbValidUntil, "长期");
+  assert.equal(kbRow.resolvedEvidence[0].kbFiles.length, 1);
+  assert.ok(typeof kbRow.resolvedEvidence[0].kbRevision === "string");
+
+  // Reject stale revision on outlineVerifyKb
+  await assert.rejects(
+    service.outlineVerifyKb({
+      projectId: created.id,
+      kbId: unverifiedRec.id,
+      expectedKbRevision: "stale-rev",
+    }),
+    /版本冲突/,
+  );
+
+  // Verify in-place & sync back to KB
+  state = await service.outlineVerifyKb({
+    projectId: created.id,
+    kbId: unverifiedRec.id,
+    expectedKbRevision: kbRow.resolvedEvidence[0].kbRevision,
+  });
+  const kbRowAfter = state.view.rows.find((r: any) => r.id === "n-kb");
+  assert.equal(kbRowAfter.resolvedMaterialStatus, "ready");
+  assert.equal(kbRowAfter.resolvedEvidence[0].status, "ready");
+  assert.equal(kbRowAfter.resolvedEvidence[0].kbVerified, true);
+  const verifiedDiskEntry = await kb.get(vault.vaultId, "record", unverifiedRec.id);
+  assert.equal(verifiedDiskEntry.verified, true);
+
+  // 2. Upload multi-page PDF with saveToKb: true -> creates verified KB record with rendered PNG pages + PDF
+  const pdfFile = path.join(sandbox, "new-cert.pdf");
+  const pdfBytes = buildMultiPagePdf(["资质首页", "资质附页"]);
+  await fs.writeFile(pdfFile, pdfBytes);
+  const uploadedPdf = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: state.revision,
+    filePath: pdfFile,
+    nodeId: "n-upload-pdf",
+    saveToKb: true,
+    kbTitle: "特种设备许可PDF",
+    kbType: "资质证书",
+    kbValidUntil: "2030-01-01",
+  })) as any;
+  assert.ok(typeof uploadedPdf.syncedKbId === "string");
+  assert.equal(uploadedPdf.binding.source, "kb");
+  assert.equal(uploadedPdf.binding.ref, uploadedPdf.syncedKbId);
+  const syncedPdfEntry = await kb.get(vault.vaultId, "record", uploadedPdf.syncedKbId);
+  assert.equal(syncedPdfEntry.verified, true);
+  assert.equal(syncedPdfEntry.fields.holder, "合成测试企业有限公司");
+  assert.equal(syncedPdfEntry.fields.validUntil, "2030-01-01");
+  const syncedPdfFiles = syncedPdfEntry.fields.files as string[];
+  assert.equal(syncedPdfFiles.length, 3); // 2 rendered PNG pages + 1 original PDF
+  assert.ok(syncedPdfFiles[0].endsWith("-p1.png"));
+  assert.ok(syncedPdfFiles[1].endsWith("-p2.png"));
+  assert.ok(syncedPdfFiles[2].endsWith(".pdf"));
+  const pdfNodeRow = uploadedPdf.view.rows.find((r: any) => r.id === "n-upload-pdf");
+  assert.equal(pdfNodeRow.resolvedMaterialStatus, "ready");
+  assert.equal(pdfNodeRow.resolvedEvidence[0].kbFiles.length, 3);
+  state = uploadedPdf;
+
+  // 3. Upload local PNG without saveToKb, then promote it to KB via outlinePromoteMaterialToKb
+  const pngFile = path.join(sandbox, "local-scan.png");
+  await fs.writeFile(pngFile, PNG_1X1_RED);
+  const uploadedLocal = (await service.outlineUploadMaterial({
+    projectId: created.id,
+    expectedRevision: state.revision,
+    filePath: pngFile,
+    nodeId: "n-promote-png",
+    saveToKb: false,
+  })) as any;
+  assert.equal(uploadedLocal.binding.source, "material");
+  const localRef = uploadedLocal.binding.ref;
+
+  const promoted = (await service.outlinePromoteMaterialToKb({
+    projectId: created.id,
+    expectedRevision: uploadedLocal.revision,
+    nodeId: "n-promote-png",
+    materialRef: localRef,
+    kbTitle: "推广入库扫描件",
+    kbType: "认证证书",
+    kbValidUntil: "长期",
+  })) as any;
+  assert.ok(typeof promoted.syncedKbId === "string");
+  const promotedEntry = await kb.get(vault.vaultId, "record", promoted.syncedKbId);
+  assert.equal(promotedEntry.verified, true);
+  assert.equal(promotedEntry.fields.title, "推广入库扫描件");
+  assert.equal((promotedEntry.fields.files as string[]).length, 1);
+  const promotedRow = promoted.view.rows.find((r: any) => r.id === "n-promote-png");
+  assert.equal(promotedRow.resolvedMaterialStatus, "ready");
+  assert.equal(promotedRow.resolvedEvidence.length, 1);
+  assert.equal(promotedRow.resolvedEvidence[0].source, "kb");
+  assert.equal(promotedRow.resolvedEvidence[0].ref, promoted.syncedKbId);
+});

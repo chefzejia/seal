@@ -5259,10 +5259,31 @@ currentWindow.__ModuleLoader__.load({
           const [confirmMissing, setConfirmMissing] = React.useState(false);
           const [conflictError, setConflictError] = React.useState("");
           const [selectedKbId, setSelectedKbId] = React.useState("");
+          const [kbRecordsOverride, setKbRecordsOverride] = React.useState<
+            OutlineKbRecordSummary[] | null
+          >(null);
           const [uploadFiles, setUploadFiles] = React.useState<
             Array<{ path: string; name: string }>
           >([]);
-          const [uploadPath, setUploadPath] = React.useState("");
+          const [saveToKb, setSaveToKb] = React.useState(true);
+          const [kbUploadTitle, setKbUploadTitle] = React.useState("");
+          const [kbUploadType, setKbUploadType] = React.useState("资质证书");
+          const [kbUploadValidUntil, setKbUploadValidUntil] = React.useState("");
+          const [promotingRef, setPromotingRef] = React.useState<string | null>(
+            null,
+          );
+          const [promoteTitle, setPromoteTitle] = React.useState("");
+          const [promoteType, setPromoteType] = React.useState("资质证书");
+          const [promoteValidUntil, setPromoteValidUntil] = React.useState("");
+          const [showMoreActions, setShowMoreActions] = React.useState(false);
+          const [reqPickerOpen, setReqPickerOpen] = React.useState(false);
+          const [reqSearch, setReqSearch] = React.useState("");
+          const [lightbox, setLightbox] = React.useState<{
+            title: string;
+            images: string[];
+            index: number;
+            rawHref?: string;
+          } | null>(null);
           const [aiInstruction, setAiInstruction] = React.useState("");
           const [titleDraft, setTitleDraft] = React.useState<{
             id: string;
@@ -5283,6 +5304,7 @@ currentWindow.__ModuleLoader__.load({
           >) => {
             setServerRevision(nextPayload.revision);
             loadedRevisionRef.current = nextPayload.revision;
+            setKbRecordsOverride(nextPayload.kbRecords);
             if (nextPayload.outline.kind === "value") {
               setBaselineOutline(nextPayload.outline.outline);
               setDraftOutline(nextPayload.outline.outline);
@@ -5312,12 +5334,26 @@ currentWindow.__ModuleLoader__.load({
 
           React.useEffect(() => {
             setUploadFiles([]);
-            setUploadPath("");
+            setKbUploadTitle("");
+            setKbUploadValidUntil("");
+            setPromotingRef(null);
             setSelectedKbId("");
+            setShowMoreActions(false);
+            setReqPickerOpen(false);
+            setReqSearch("");
             setAiInstruction("");
             setTitleDraft(null);
             deleteConfirm.reset();
           }, [selectedNodeId]);
+
+          React.useEffect(() => {
+            if (!lightbox) return;
+            const onKeyDown = (event: KeyboardEvent) => {
+              if (event.key === "Escape") setLightbox(null);
+            };
+            window.addEventListener("keydown", onKeyDown);
+            return () => window.removeEventListener("keydown", onKeyDown);
+          }, [lightbox]);
 
           React.useEffect(() => {
             if (props.focusNodeId && draftOutline) {
@@ -5507,6 +5543,7 @@ currentWindow.__ModuleLoader__.load({
             );
           }
 
+          const activeKbRecords = kbRecordsOverride ?? payload.kbRecords;
           const liveConfirmationStatus: OutlineConfirmationStatus =
             isDirty && payload.view.confirmationStatus === "confirmed"
               ? "stale"
@@ -5520,7 +5557,7 @@ currentWindow.__ModuleLoader__.load({
                 : null,
             baselineOutline,
             requirements: payload.requirements,
-            kbRecords: payload.kbRecords,
+            kbRecords: activeKbRecords,
             materials: payload.materials,
             c17Issues: payload.view.c17Issues,
           });
@@ -5721,33 +5758,80 @@ currentWindow.__ModuleLoader__.load({
             }
           }
 
-          const uploadTargets = [
-            ...uploadFiles.map((f) => f.path),
-            ...(uploadPath.trim() ? [uploadPath.trim()] : []),
+          const canSyncToKb = Boolean(payload.project.vaultId);
+          const kbTypeOptions = [
+            "资质证书",
+            "营业执照",
+            "认证证书",
+            "人员证书",
+            "财务审计",
+            "业绩合同",
+            "其他",
           ];
 
-          const handleUploadMaterial = (nodeId: string) =>
+          const handleVerifyKbRecord = (
+            kbId: string,
+            expectedKbRevision: string,
+          ) =>
             action.run(async () => {
-              const targetFile = uploadTargets[0];
-              if (!targetFile) throw new Error("请选择或输入本地材料文件路径");
+              const res = await api<
+                Extract<OutlineGetResponse, { projectKind: "project" }>
+              >("outline_verify_kb", {
+                projectId: props.projectId,
+                kbId,
+                expectedKbRevision,
+              });
+              if (!isDirty) {
+                syncFromPayload(res);
+              } else {
+                setServerRevision(res.revision);
+                loadedRevisionRef.current = res.revision;
+                setKbRecordsOverride(res.kbRecords);
+                if (res.outline.kind === "value") {
+                  setBaselineOutline(res.outline.outline);
+                }
+              }
+              props.onReloadOverview();
+            }, t("outlineKbVerifiedNotice"));
+
+          const handleUploadMaterial = (nodeId: string, defaultTitle?: string) =>
+            action.run(async () => {
+              const targetFile = uploadFiles[0]?.path;
+              if (!targetFile) throw new Error("请选择要上传的本地材料文件");
               const nodeOnDisk = Boolean(
                 baselineOutline?.nodes.some((node) => node.id === nodeId),
               );
               const persistDirectly = !isDirty && nodeOnDisk;
+              const syncKbNow = canSyncToKb && saveToKb;
               try {
                 const res = await api<
-                  { binding: OutlineEvidenceBinding } & Extract<
-                    OutlineGetResponse,
-                    { projectKind: "project" }
-                  >
+                  {
+                    binding: OutlineEvidenceBinding;
+                    syncedKbId?: string;
+                  } & Extract<OutlineGetResponse, { projectKind: "project" }>
                 >("outline_upload_material", {
                   projectId: props.projectId,
                   expectedRevision: serverRevision,
                   filePath: targetFile,
                   ...(persistDirectly ? { nodeId } : {}),
+                  ...(syncKbNow
+                    ? {
+                        saveToKb: true,
+                        kbTitle:
+                          kbUploadTitle.trim() ||
+                          defaultTitle ||
+                          uploadFiles[0]?.name,
+                        kbType: kbUploadType,
+                        ...(kbUploadValidUntil.trim()
+                          ? { kbValidUntil: kbUploadValidUntil.trim() }
+                          : {}),
+                      }
+                    : {}),
                 });
                 setUploadFiles([]);
-                setUploadPath("");
+                setKbUploadTitle("");
+                setKbUploadValidUntil("");
+                setKbRecordsOverride(res.kbRecords);
                 if (persistDirectly) {
                   syncFromPayload(res);
                 } else {
@@ -5771,7 +5855,46 @@ currentWindow.__ModuleLoader__.load({
                 if (msg.includes("版本冲突")) setConflictError(msg);
                 throw error;
               }
-            }, t("processed"));
+            }, canSyncToKb && saveToKb ? t("outlinePromotedToKbNotice") : t("processed"));
+
+          const handlePromoteMaterialToKb = (
+            nodeId: string,
+            materialRef: string,
+            fallbackTitle: string,
+          ) =>
+            action.run(async () => {
+              const effectiveRevision = isDirty
+                ? (await saveDraftOutline()).revision
+                : serverRevision;
+              try {
+                const res = await api<
+                  { syncedKbId?: string } & Extract<
+                    OutlineGetResponse,
+                    { projectKind: "project" }
+                  >
+                >("outline_promote_material_to_kb", {
+                  projectId: props.projectId,
+                  expectedRevision: effectiveRevision,
+                  nodeId,
+                  materialRef,
+                  kbTitle: promoteTitle.trim() || fallbackTitle,
+                  kbType: promoteType,
+                  ...(promoteValidUntil.trim()
+                    ? { kbValidUntil: promoteValidUntil.trim() }
+                    : {}),
+                });
+                setPromotingRef(null);
+                setPromoteTitle("");
+                setPromoteValidUntil("");
+                syncFromPayload(res);
+                props.onReloadOverview();
+              } catch (error) {
+                const msg =
+                  error instanceof Error ? error.message : String(error);
+                if (msg.includes("版本冲突")) setConflictError(msg);
+                throw error;
+              }
+            }, t("outlinePromotedToKbNotice"));
 
           const handleAddVolume = () => {
             const trimmed = newVolumeName.trim();
@@ -5827,11 +5950,6 @@ currentWindow.__ModuleLoader__.load({
                 ),
                 h("strong", null, payload.project.name),
                 h("span", { className: statusMeta.className }, statusMeta.label),
-                h(
-                  "span",
-                  { className: "seal-badge" },
-                  t("outlineSafeNotice"),
-                ),
               ),
               h(
                 "div",
@@ -5962,8 +6080,11 @@ currentWindow.__ModuleLoader__.load({
               h(
                 "div",
                 { className: "seal-segmented", role: "tablist" },
-                ...draftOutline.volumes.map((vol) =>
-                  h(
+                ...draftOutline.volumes.map((vol) => {
+                  const volCount = liveView.rows.filter(
+                    (row) => row.volume === vol.name && row.included,
+                  ).length;
+                  return h(
                     "button",
                     {
                       key: vol.name,
@@ -5975,9 +6096,9 @@ currentWindow.__ModuleLoader__.load({
                         setSelectedNodeId(null);
                       },
                     },
-                    vol.name,
-                  ),
-                ),
+                    `${vol.name} (${volCount})`,
+                  );
+                }),
               ),
               h(
                 "div",
@@ -6030,13 +6151,16 @@ currentWindow.__ModuleLoader__.load({
                 [
                   ["all", t("outlineFilterAll")],
                   ["missing_material", t("outlineFilterMissing")],
-                  ["needs_review", t("outlineFilterNeedsReview")],
-                  ["uncovered_req", t("outlineFilterUncovered")],
-                  ["template", t("outlineFilterTemplate")],
-                  ["authored", t("outlineFilterAuthored")],
-                  ["attachment", t("outlineFilterAttachment")],
-                  ["excluded", t("outlineFilterExcluded")],
-                  ...(filterCounts.c17 > 0
+                  ...(filterCounts.needs_review > 0 || filter === "needs_review"
+                    ? ([["needs_review", t("outlineFilterNeedsReview")]] as const)
+                    : []),
+                  ...(filterCounts.uncovered_req > 0 || filter === "uncovered_req"
+                    ? ([["uncovered_req", t("outlineFilterUncovered")]] as const)
+                    : []),
+                  ...(filterCounts.excluded > 0 || filter === "excluded"
+                    ? ([["excluded", t("outlineFilterExcluded")]] as const)
+                    : []),
+                  ...(filterCounts.c17 > 0 || filter === "c17"
                     ? ([["c17", t("outlineFilterC17")]] as const)
                     : []),
                 ] as ReadonlyArray<readonly [OutlineRowFilter, string]>
@@ -6105,6 +6229,11 @@ currentWindow.__ModuleLoader__.load({
                   ),
                 ),
                 h(
+                  "span",
+                  { className: "seal-small", style: { marginTop: 2 } },
+                  `${t("outlineAllVolumesHint")}（${liveView.summary.volumeCount} ${t("outlineVolumes")} · ${liveView.summary.includedNodes} 节）`,
+                ),
+                h(
                   "div",
                   { className: "seal-outline-stat-grid" },
                   h(
@@ -6116,14 +6245,14 @@ currentWindow.__ModuleLoader__.load({
                   h(
                     "div",
                     { className: "seal-outline-stat-cell" },
-                    h("span", { className: "seal-small" }, t("outlineStatExcluded")),
-                    h("strong", null, liveView.summary.excludedNodes),
+                    h("span", { className: "seal-small" }, t("outlineStatMissing")),
+                    h("strong", null, liveView.summary.missingMaterials),
                   ),
                   h(
                     "div",
                     { className: "seal-outline-stat-cell" },
-                    h("span", { className: "seal-small" }, t("outlineStatMissing")),
-                    h("strong", null, liveView.summary.missingMaterials),
+                    h("span", { className: "seal-small" }, t("outlineFilterNeedsReview")),
+                    h("strong", null, liveView.summary.needsReviewMaterials),
                   ),
                   h(
                     "div",
@@ -6140,9 +6269,19 @@ currentWindow.__ModuleLoader__.load({
                   "div",
                   { className: "seal-row seal-between" },
                   h(
-                    "h2",
-                    { style: { margin: 0 } },
-                    `${t("outlineTreeTitle")} · ${liveView.summary.includedNodes}`,
+                    "div",
+                    { className: "seal-row" },
+                    h(
+                      "h2",
+                      { style: { margin: 0 } },
+                      `${volumeName || t("outlineTreeTitle")} · ${filterCounts.all}`,
+                    ),
+                    draftOutline.volumes.length > 1 &&
+                      h(
+                        "span",
+                        { className: "seal-small" },
+                        `${t("outlineAllVolumesHint")} ${liveView.summary.includedNodes}`,
+                      ),
                   ),
                   h(
                     "button",
@@ -6261,43 +6400,40 @@ currentWindow.__ModuleLoader__.load({
                               className: "seal-row",
                               onClick: () => setSelectedNodeId(row.id),
                             },
-                            h(
-                              "span",
-                              { className: "seal-badge" },
-                              isLocked
-                                ? t("outlineLockedTemplate")
-                                : kindLabel(row.kind),
-                            ),
-                            row.resolvedMaterialStatus === "missing" &&
-                              h(
-                                "span",
-                                { className: "seal-badge seal-badge-warn" },
-                                t("outlineMatMissing"),
-                              ),
-                            row.resolvedMaterialStatus === "needs_review" &&
-                              h(
-                                "span",
-                                { className: "seal-badge seal-badge-warn" },
-                                t("outlineMatNeedsReview"),
-                              ),
-                            row.resolvedMaterialStatus === "ready" &&
-                              h(
-                                "span",
-                                { className: "seal-badge seal-badge-ok" },
-                                t("outlineMatReady"),
-                              ),
-                            (row.requirementIds?.length ?? 0) > 0 &&
-                              h(
-                                "span",
-                                { className: "seal-badge seal-badge-info" },
-                                `${row.requirementIds!.length} ${t("outlineReqCountSuffix")}`,
-                              ),
-                            row.c17Issues.length > 0 &&
-                              h(
-                                "span",
-                                { className: "seal-badge seal-badge-error" },
-                                `C17 (${row.c17Issues.length})`,
-                              ),
+                            !row.included
+                              ? h(
+                                  "span",
+                                  { className: "seal-badge" },
+                                  t("outlineFilterExcluded"),
+                                )
+                              : row.c17Issues.length > 0
+                                ? h(
+                                    "span",
+                                    { className: "seal-badge seal-badge-error" },
+                                    `C17 (${row.c17Issues.length})`,
+                                  )
+                                : row.resolvedMaterialStatus === "missing"
+                                  ? h(
+                                      "span",
+                                      { className: "seal-badge seal-badge-warn" },
+                                      t("outlineMatMissing"),
+                                    )
+                                  : row.resolvedMaterialStatus === "needs_review"
+                                    ? h(
+                                        "span",
+                                        { className: "seal-badge seal-badge-info" },
+                                        t("outlineMatNeedsReview"),
+                                      )
+                                    : isLocked
+                                      ? h(
+                                          "span",
+                                          {
+                                            className: "seal-outline-lock-icon",
+                                            title: t("outlineLockedTemplate"),
+                                          },
+                                          "🔒",
+                                        )
+                                      : null,
                           ),
                         ),
                         isSelected &&
@@ -6356,7 +6492,7 @@ currentWindow.__ModuleLoader__.load({
                                       ),
                                     ),
                                 },
-                                `↑ ${t("outlineMoveUp")}`,
+                                "↑",
                               ),
                               h(
                                 "button",
@@ -6378,81 +6514,96 @@ currentWindow.__ModuleLoader__.load({
                                       ),
                                     ),
                                 },
-                                `↓ ${t("outlineMoveDown")}`,
+                                "↓",
                               ),
                               h(
                                 "button",
                                 {
                                   type: "button",
-                                  className: "seal-btn-sm",
-                                  disabled: !canOutdentOutlineNode(
-                                    draftOutline,
-                                    row.id,
-                                  ),
+                                  className: "seal-btn-ghost seal-btn-sm",
                                   onClick: () =>
-                                    commitEdit(
-                                      outdentOutlineNode(draftOutline, row.id, {
-                                        updatedAt: nowIso,
-                                        updatedBy: "human",
-                                      }),
-                                    ),
+                                    setShowMoreActions((prev) => !prev),
                                 },
-                                `← ${t("outlineOutdent")}`,
-                              ),
-                              h(
-                                "button",
-                                {
-                                  type: "button",
-                                  className: "seal-btn-sm",
-                                  disabled:
-                                    row.level >= 6 ||
-                                    !canIndentOutlineNode(draftOutline, row.id),
-                                  onClick: () =>
-                                    commitEdit(
-                                      indentOutlineNode(draftOutline, row.id, {
-                                        updatedAt: nowIso,
-                                        updatedBy: "human",
-                                      }),
-                                    ),
-                                },
-                                `→ ${t("outlineIndent")}`,
-                              ),
-                              h(
-                                "button",
-                                {
-                                  type: "button",
-                                  className: "seal-btn-sm",
-                                  disabled: isLocked,
-                                  onClick: () =>
-                                    commitEdit(
-                                      updateOutlineNode(
-                                        draftOutline,
-                                        row.id,
-                                        { included: !row.included },
-                                        { updatedAt: nowIso, updatedBy: "human" },
-                                      ),
-                                    ),
-                                },
-                                t(
-                                  row.included
-                                    ? "outlineSkip"
-                                    : "outlineInclude",
-                                ),
-                              ),
-                              h(
-                                "button",
-                                {
-                                  type: "button",
-                                  className: "seal-btn-danger seal-btn-sm",
-                                  disabled: !canDeleteOutlineNode(
-                                    draftOutline,
-                                    row.id,
-                                  ),
-                                  onClick: () => deleteConfirm.open(row.id),
-                                },
-                                t("outlineDeleteNode"),
+                                `${t("outlineMoreActions")} ${showMoreActions ? "▴" : "▾"}`,
                               ),
                             ),
+                            showMoreActions &&
+                              h(
+                                "div",
+                                { className: "seal-row" },
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "seal-btn-sm",
+                                    disabled: !canOutdentOutlineNode(
+                                      draftOutline,
+                                      row.id,
+                                    ),
+                                    onClick: () =>
+                                      commitEdit(
+                                        outdentOutlineNode(draftOutline, row.id, {
+                                          updatedAt: nowIso,
+                                          updatedBy: "human",
+                                        }),
+                                      ),
+                                  },
+                                  `← ${t("outlineOutdent")}`,
+                                ),
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "seal-btn-sm",
+                                    disabled:
+                                      row.level >= 6 ||
+                                      !canIndentOutlineNode(draftOutline, row.id),
+                                    onClick: () =>
+                                      commitEdit(
+                                        indentOutlineNode(draftOutline, row.id, {
+                                          updatedAt: nowIso,
+                                          updatedBy: "human",
+                                        }),
+                                      ),
+                                  },
+                                  `→ ${t("outlineIndent")}`,
+                                ),
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "seal-btn-sm",
+                                    disabled: isLocked,
+                                    onClick: () =>
+                                      commitEdit(
+                                        updateOutlineNode(
+                                          draftOutline,
+                                          row.id,
+                                          { included: !row.included },
+                                          { updatedAt: nowIso, updatedBy: "human" },
+                                        ),
+                                      ),
+                                  },
+                                  t(
+                                    row.included
+                                      ? "outlineSkip"
+                                      : "outlineInclude",
+                                  ),
+                                ),
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "seal-btn-danger seal-btn-sm",
+                                    disabled: !canDeleteOutlineNode(
+                                      draftOutline,
+                                      row.id,
+                                    ),
+                                    onClick: () => deleteConfirm.open(row.id),
+                                  },
+                                  t("outlineDeleteNode"),
+                                ),
+                              ),
                             deleteConfirm.targetKey === row.id &&
                               h(
                                 "div",
@@ -6513,7 +6664,44 @@ currentWindow.__ModuleLoader__.load({
                       h(
                         "div",
                         { className: "seal-row seal-between" },
-                        h("h3", null, t("outlineDetailTitle")),
+                        h(
+                          "div",
+                          { className: "seal-stack-sm", style: { flex: "1 1 0", minWidth: 0 } },
+                          h(
+                            "h3",
+                            { style: { margin: 0, overflowWrap: "anywhere" } },
+                            `${selectedRow.number ? `${selectedRow.number} ` : ""}${selectedRow.title}`,
+                          ),
+                          h(
+                            "div",
+                            { className: "seal-row" },
+                            h(
+                              "span",
+                              { className: "seal-badge" },
+                              selectedLocked
+                                ? `🔒 ${t("outlineLockedTemplate")}`
+                                : kindLabel(selectedRow.kind),
+                            ),
+                            selectedRow.resolvedMaterialStatus === "missing" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-warn" },
+                                t("outlineMatMissing"),
+                              ),
+                            selectedRow.resolvedMaterialStatus === "needs_review" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-info" },
+                                t("outlineMatNeedsReview"),
+                              ),
+                            selectedRow.resolvedMaterialStatus === "ready" &&
+                              h(
+                                "span",
+                                { className: "seal-badge seal-badge-ok" },
+                                t("outlineMatReady"),
+                              ),
+                          ),
+                        ),
                         h(
                           "button",
                           {
@@ -6525,181 +6713,66 @@ currentWindow.__ModuleLoader__.load({
                         ),
                       ),
                       h(
-                        "label",
-                        null,
-                        t("outlineNodeNumber"),
-                        h("input", {
-                          value: selectedRow.number ?? "",
-                          onChange: (e: any) =>
-                            commitEdit(
-                              updateOutlineNode(
-                                draftOutline,
-                                selectedRow.id,
-                                { number: e.target.value || undefined },
-                                { updatedAt: nowIso, updatedBy: "human" },
-                              ),
-                            ),
-                        }),
-                      ),
-                      h(
-                        "label",
-                        null,
-                        t("outlineNodeTitle"),
-                        h("input", {
-                          value:
-                            titleDraft?.id === selectedRow.id
-                              ? titleDraft.value
-                              : selectedRow.title,
-                          disabled: selectedLocked,
-                          onChange: (e: any) => {
-                            const nextVal = String(e.target.value);
-                            setTitleDraft({
-                              id: selectedRow.id,
-                              value: nextVal,
-                            });
-                            if (nextVal.trim()) {
-                              commitEdit(
-                                updateOutlineNode(
-                                  draftOutline,
-                                  selectedRow.id,
-                                  { title: nextVal },
-                                  { updatedAt: nowIso, updatedBy: "human" },
-                                ),
-                              );
-                            }
-                          },
-                          onBlur: () => setTitleDraft(null),
-                        }),
-                      ),
-                      h(
-                        "label",
-                        null,
-                        t("outlineNodeKind"),
-                        h(
-                          "select",
-                          {
-                            value: selectedRow.kind,
-                            disabled: selectedLocked,
-                            onChange: (e: any) =>
-                              commitEdit(
-                                updateOutlineNode(
-                                  draftOutline,
-                                  selectedRow.id,
-                                  { kind: e.target.value as OutlineNodeKind },
-                                  { updatedAt: nowIso, updatedBy: "human" },
-                                ),
-                              ),
-                          },
-                          h("option", { value: "template" }, t("outlineKindTemplate")),
-                          h("option", { value: "authored" }, t("outlineKindAuthored")),
-                          h(
-                            "option",
-                            { value: "attachment" },
-                            t("outlineKindAttachment"),
-                          ),
-                        ),
-                      ),
-                      h(
-                        "div",
-                        { className: "seal-row" },
-                        h("input", {
-                          id: `inc-${selectedRow.id}`,
-                          type: "checkbox",
-                          checked: selectedRow.included,
-                          disabled: selectedLocked,
-                          onChange: (e: any) =>
-                            commitEdit(
-                              updateOutlineNode(
-                                draftOutline,
-                                selectedRow.id,
-                                { included: Boolean(e.target.checked) },
-                                { updatedAt: nowIso, updatedBy: "human" },
-                              ),
-                            ),
-                        }),
-                        h(
-                          "span",
-                          { className: "seal-small" },
-                          t("outlineIncludedToggle"),
-                        ),
-                      ),
-                      selectedRow.kind === "template" &&
-                        h(
-                          "div",
-                          { className: "seal-row" },
-                          h("input", {
-                            id: `opt-${selectedRow.id}`,
-                            type: "checkbox",
-                            checked: Boolean(selectedRow.optional),
-                            disabled: selectedLocked,
-                            onChange: (e: any) =>
-                              commitEdit(
-                                updateOutlineNode(
-                                  draftOutline,
-                                  selectedRow.id,
-                                  { optional: Boolean(e.target.checked) },
-                                  { updatedAt: nowIso, updatedBy: "human" },
-                                ),
-                              ),
-                          }),
-                          h(
-                            "span",
-                            { className: "seal-small" },
-                            t("outlineNodeOptional"),
-                          ),
-                        ),
-                      h(
-                        "label",
-                        null,
-                        t("outlineNodeExpectedHeading"),
-                        h("input", {
-                          value: selectedRow.expectedHeading ?? "",
-                          placeholder: selectedRow.title,
-                          onChange: (e: any) =>
-                            commitEdit(
-                              updateOutlineNode(
-                                draftOutline,
-                                selectedRow.id,
-                                {
-                                  expectedHeading: e.target.value || undefined,
-                                },
-                                { updatedAt: nowIso, updatedBy: "human" },
-                              ),
-                            ),
-                        }),
-                      ),
-                      h(
-                        "label",
-                        null,
-                        t("outlineNodeNote"),
-                        h("textarea", {
-                          value: selectedRow.note ?? "",
-                          placeholder: t("outlineNodeNotePlaceholder"),
-                          onChange: (e: any) =>
-                            commitEdit(
-                              updateOutlineNode(
-                                draftOutline,
-                                selectedRow.id,
-                                { note: e.target.value || undefined },
-                                { updatedAt: nowIso, updatedBy: "human" },
-                              ),
-                            ),
-                        }),
-                      ),
-                      h(
                         "div",
                         { className: "seal-stack-sm seal-divider" },
                         h("h3", null, t("outlineEvidenceSection")),
                         ...selectedRow.resolvedEvidence.map((ev) => {
+                          const evTitle = ev.title ?? ev.label ?? ev.ref;
+                          const vaultId = payload.project.vaultId;
+                          const kbImageEntries =
+                            ev.source === "kb" && vaultId && ev.kbFiles
+                              ? ev.kbFiles
+                                  .map((file, index) => ({ file, index }))
+                                  .filter(({ file }) =>
+                                    /\.(png|jpe?g|webp|bmp|tif|tiff|gif|svg)$/i.test(
+                                      file,
+                                    ),
+                                  )
+                              : [];
+                          const kbThumbUrls = kbImageEntries.map(
+                            ({ index }) =>
+                              `/api/seal/kb-file?${new URLSearchParams({
+                                vaultId: vaultId!,
+                                kind: "record",
+                                id: ev.ref,
+                                index: String(index),
+                              })}`,
+                          );
                           const materialHref =
                             ev.source === "material"
                               ? `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: ev.ref })}`
-                              : "";
-                          const isImg =
+                              : kbThumbUrls[0] ?? "";
+                          const materialThumbUrls =
+                            ev.source === "material"
+                              ? ev.renderedPages && ev.renderedPages.length > 0
+                                ? ev.renderedPages.map(
+                                    (page) =>
+                                      `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: page })}`,
+                                  )
+                                : /\.(png|jpe?g|webp|bmp|tif|tiff|gif|svg)$/i.test(
+                                      ev.ref,
+                                    )
+                                  ? [materialHref]
+                                  : []
+                              : [];
+                          const thumbUrls =
+                            ev.source === "kb"
+                              ? kbThumbUrls
+                              : materialThumbUrls;
+                          const kbFacts = [
+                            ev.kbHolder,
+                            ev.kbValidUntil
+                              ? `有效期 ${ev.kbValidUntil}`
+                              : null,
+                            ev.kbNumber ? `编号 ${ev.kbNumber}` : null,
+                          ].filter(Boolean);
+                          const needsHumanVerify =
+                            ev.source === "kb" &&
+                            ev.kbVerified === false &&
+                            Boolean(ev.kbRevision);
+                          const isPromotingThis =
                             ev.source === "material" &&
-                            /\.(png|jpe?g|webp|bmp|tif|tiff|gif|svg)$/i.test(
-                              ev.ref,
-                            );
+                            promotingRef === ev.ref;
                           return h(
                             "div",
                             {
@@ -6711,8 +6784,13 @@ currentWindow.__ModuleLoader__.load({
                               { className: "seal-row seal-between" },
                               h(
                                 "strong",
-                                { className: "seal-small" },
-                                ev.title ?? ev.label ?? ev.ref,
+                                {
+                                  className: "seal-small",
+                                  style: {
+                                    color: "var(--dsw-alias-label-primary)",
+                                  },
+                                },
+                                evTitle,
                               ),
                               h(
                                 "button",
@@ -6738,31 +6816,39 @@ currentWindow.__ModuleLoader__.load({
                               { className: "seal-row" },
                               h(
                                 "span",
+                                { className: "seal-badge" },
+                                ev.source === "kb"
+                                  ? t("outlineKbSourceTag")
+                                  : t("outlineLocalSourceTag"),
+                              ),
+                              h(
+                                "span",
                                 {
-                                  className: `seal-badge ${ev.status === "ready" ? "seal-badge-ok" : ev.status === "unverified" ? "seal-badge-warn" : "seal-badge-error"}`,
+                                  className: `seal-badge ${ev.status === "ready" ? "seal-badge-ok" : ev.status === "unverified" ? "seal-badge-info" : "seal-badge-error"}`,
                                 },
                                 ev.source === "kb"
                                   ? ev.status === "ready"
                                     ? t("verified")
-                                    : ev.status === "unverified"
-                                      ? t("unverified")
-                                      : t("outlineMatMissing")
+                                    : ev.kbVerified
+                                      ? t("outlineKbMissingMetaHint")
+                                      : ev.status === "unverified"
+                                        ? t("unverified")
+                                        : t("outlineMatMissing")
                                   : ev.status === "ready"
                                     ? t("outlineMatReady")
                                     : t("outlineMatMissing"),
                               ),
-                              ev.renderedPages &&
-                                ev.renderedPages.length > 0 &&
+                              thumbUrls.length > 1 &&
                                 h(
                                   "span",
-                                  { className: "seal-badge seal-badge-info" },
-                                  `${t("outlinePdfPagesCount")} ${ev.renderedPages.length} 页`,
+                                  { className: "seal-small" },
+                                  `${t("outlinePdfPagesCount")} ${thumbUrls.length} 页`,
                                 ),
                               materialHref &&
                                 h(
                                   "a",
                                   {
-                                    className: "seal-link seal-btn-sm",
+                                    className: "seal-link seal-small",
                                     href: materialHref,
                                     target: "_blank",
                                     rel: "noreferrer",
@@ -6770,50 +6856,195 @@ currentWindow.__ModuleLoader__.load({
                                   t("outlinePreviewFile"),
                                 ),
                             ),
-                            isImg &&
-                              h("img", {
-                                src: materialHref,
-                                className: "seal-outline-preview-thumb",
-                                alt: ev.label ?? ev.ref,
-                              }),
-                            ev.renderedPages &&
-                              ev.renderedPages.length > 0 &&
+                            kbFacts.length > 0 &&
+                              h(
+                                "span",
+                                { className: "seal-small" },
+                                kbFacts.join(" · "),
+                              ),
+                            thumbUrls.length > 0
+                              ? h(
+                                  "div",
+                                  { className: "seal-outline-thumbs" },
+                                  ...thumbUrls.slice(0, 4).map((url, idx) =>
+                                    h(
+                                      "button",
+                                      {
+                                        key: url,
+                                        type: "button",
+                                        className: "seal-outline-thumb-btn",
+                                        title: t("outlineClickToZoom"),
+                                        onClick: () =>
+                                          setLightbox({
+                                            title: evTitle,
+                                            images: thumbUrls,
+                                            index: idx,
+                                            rawHref: materialHref || url,
+                                          }),
+                                      },
+                                      h("img", {
+                                        src: url,
+                                        className: "seal-outline-preview-thumb",
+                                        alt: `${evTitle} · ${idx + 1}`,
+                                      }),
+                                    ),
+                                  ),
+                                )
+                              : ev.source === "kb" &&
+                                h(
+                                  "span",
+                                  { className: "seal-small" },
+                                  t("outlineNoImagePreview"),
+                                ),
+                            needsHumanVerify &&
                               h(
                                 "div",
-                                { className: "seal-row" },
-                                ...ev.renderedPages.slice(0, 4).map((page, idx) =>
-                                  h("img", {
-                                    key: page,
-                                    src: `/api/seal/file?${new URLSearchParams({ projectId: props.projectId, material: page })}`,
-                                    className: "seal-outline-preview-thumb",
-                                    alt: `${ev.label ?? ev.ref} · ${idx + 1}`,
-                                  }),
+                                { className: "seal-outline-verify-bar" },
+                                h(
+                                  "span",
+                                  { className: "seal-small" },
+                                  t("outlineKbUnverifiedHint"),
+                                ),
+                                h(
+                                  "button",
+                                  {
+                                    type: "button",
+                                    className: "seal-btn-primary seal-btn-sm",
+                                    disabled: action.busy,
+                                    onClick: () =>
+                                      void handleVerifyKbRecord(
+                                        ev.ref,
+                                        ev.kbRevision!,
+                                      ),
+                                  },
+                                  t("outlineKbVerifyBtn"),
                                 ),
                               ),
+                            ev.source === "material" &&
+                              canSyncToKb &&
+                              ev.status === "ready" &&
+                              (!isPromotingThis
+                                ? h(
+                                    "button",
+                                    {
+                                      type: "button",
+                                      className: "seal-btn-sm",
+                                      disabled: action.busy,
+                                      onClick: () => {
+                                        setPromotingRef(ev.ref);
+                                        setPromoteTitle(
+                                          ev.label || selectedRow.title,
+                                        );
+                                        setPromoteType("资质证书");
+                                        setPromoteValidUntil("");
+                                      },
+                                    },
+                                    t("outlinePromoteToKbBtn"),
+                                  )
+                                : h(
+                                    "div",
+                                    { className: "seal-outline-kb-form" },
+                                    h(
+                                      "label",
+                                      null,
+                                      t("outlineSaveToKbTitle"),
+                                      h("input", {
+                                        value: promoteTitle,
+                                        onChange: (e: any) =>
+                                          setPromoteTitle(e.target.value),
+                                      }),
+                                    ),
+                                    h(
+                                      "div",
+                                      { className: "seal-grid-2" },
+                                      h(
+                                        "label",
+                                        null,
+                                        t("outlineSaveToKbType"),
+                                        h(
+                                          "select",
+                                          {
+                                            value: promoteType,
+                                            onChange: (e: any) =>
+                                              setPromoteType(e.target.value),
+                                          },
+                                          ...kbTypeOptions.map((opt) =>
+                                            h(
+                                              "option",
+                                              { key: opt, value: opt },
+                                              opt,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      h(
+                                        "label",
+                                        null,
+                                        t("outlineSaveToKbValidUntil"),
+                                        h("input", {
+                                          value: promoteValidUntil,
+                                          placeholder: t(
+                                            "outlineSaveToKbValidUntilPlaceholder",
+                                          ),
+                                          onChange: (e: any) =>
+                                            setPromoteValidUntil(
+                                              e.target.value,
+                                            ),
+                                        }),
+                                      ),
+                                    ),
+                                    h(
+                                      "div",
+                                      { className: "seal-row" },
+                                      h(
+                                        "button",
+                                        {
+                                          type: "button",
+                                          className:
+                                            "seal-btn-primary seal-btn-sm",
+                                          disabled: action.busy,
+                                          onClick: () =>
+                                            void handlePromoteMaterialToKb(
+                                              selectedRow.id,
+                                              ev.ref,
+                                              evTitle,
+                                            ),
+                                        },
+                                        t("outlinePromoteToKbBtn"),
+                                      ),
+                                      h(
+                                        "button",
+                                        {
+                                          type: "button",
+                                          className: "seal-btn-ghost seal-btn-sm",
+                                          disabled: action.busy,
+                                          onClick: () => setPromotingRef(null),
+                                        },
+                                        t("cancelDelete"),
+                                      ),
+                                    ),
+                                  )),
                           );
                         }),
-                        payload.kbRecords.length > 0 &&
+                        activeKbRecords.length > 0 &&
                           h(
                             "div",
-                            { className: "seal-stack-sm" },
+                            { className: "seal-row" },
                             h(
-                              "label",
-                              null,
-                              t("outlineBindKbLabel"),
-                              h(
-                                "select",
-                                {
-                                  value: selectedKbId,
-                                  onChange: (e: any) =>
-                                    setSelectedKbId(e.target.value),
-                                },
-                                h("option", { value: "" }, t("outlineSelectKbOption")),
-                                ...payload.kbRecords.map((rec) =>
-                                  h(
-                                    "option",
-                                    { key: rec.id, value: rec.id },
-                                    `${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""} · ${t(rec.verified ? "verified" : "unverified")}`,
-                                  ),
+                              "select",
+                              {
+                                value: selectedKbId,
+                                style: { flex: "1 1 0", minWidth: 0 },
+                                "aria-label": t("outlineBindKbLabel"),
+                                onChange: (e: any) =>
+                                  setSelectedKbId(e.target.value),
+                              },
+                              h("option", { value: "" }, t("outlineSelectKbOption")),
+                              ...activeKbRecords.map((rec) =>
+                                h(
+                                  "option",
+                                  { key: rec.id, value: rec.id },
+                                  `${rec.title ?? rec.id}${rec.type ? ` (${rec.type})` : ""} · ${t(rec.verified ? "verified" : "unverified")}`,
                                 ),
                               ),
                             ),
@@ -6824,7 +7055,7 @@ currentWindow.__ModuleLoader__.load({
                                 className: "seal-btn-sm",
                                 disabled: !selectedKbId,
                                 onClick: () => {
-                                  const rec = payload.kbRecords.find(
+                                  const rec = activeKbRecords.find(
                                     (r) => r.id === selectedKbId,
                                   );
                                   if (!rec) return;
@@ -6851,218 +7082,544 @@ currentWindow.__ModuleLoader__.load({
                         h(
                           "div",
                           { className: "seal-stack-sm" },
-                          h("span", { className: "seal-small" }, t("outlineUploadTitle")),
                           h(FilePicker, {
                             label: t("outlineUploadHint"),
                             accept:
                               ".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.gif,.pdf,.docx,.txt,.md",
                             allowAny: true,
-                            onFiles: setUploadFiles,
+                            onFiles: (
+                              files: Array<{ path: string; name: string }>,
+                            ) => {
+                              setUploadFiles(files);
+                              if (files.length > 0 && !kbUploadTitle.trim()) {
+                                setKbUploadTitle(selectedRow.title);
+                              }
+                            },
                           }),
                           uploadFiles.length > 0 &&
                             h(
                               "div",
-                              { className: "seal-chips" },
-                              ...uploadFiles.map((file, idx) =>
-                                h(
-                                  "span",
-                                  { key: `${file.path}:${idx}`, className: "seal-chip" },
+                              { className: "seal-stack-sm" },
+                              h(
+                                "div",
+                                { className: "seal-chips" },
+                                ...uploadFiles.map((file, idx) =>
                                   h(
                                     "span",
-                                    { className: "seal-chip-text", title: file.name },
-                                    file.name,
+                                    { key: `${file.path}:${idx}`, className: "seal-chip" },
+                                    h(
+                                      "span",
+                                      { className: "seal-chip-text", title: file.name },
+                                      file.name,
+                                    ),
+                                    h(
+                                      "button",
+                                      {
+                                        type: "button",
+                                        className: "seal-chip-remove",
+                                        "aria-label": file.name,
+                                        onClick: () =>
+                                          setUploadFiles((prev) =>
+                                            prev.filter((_, i) => i !== idx),
+                                          ),
+                                      },
+                                      "×",
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              canSyncToKb &&
+                                h(
+                                  "div",
+                                  { className: "seal-outline-kb-form" },
+                                  h(
+                                    "label",
+                                    { className: "seal-inline-check" },
+                                    h("input", {
+                                      type: "checkbox",
+                                      checked: saveToKb,
+                                      onChange: (e: any) =>
+                                        setSaveToKb(Boolean(e.target.checked)),
+                                    }),
+                                    h(
+                                      "span",
+                                      { className: "seal-small", style: { color: "var(--dsw-alias-label-primary)" } },
+                                      t("outlineSaveToKbToggle"),
+                                    ),
                                   ),
                                   h(
-                                    "button",
-                                    {
-                                      type: "button",
-                                      className: "seal-chip-remove",
-                                      "aria-label": file.name,
-                                      onClick: () =>
-                                        setUploadFiles((prev) =>
-                                          prev.filter((_, i) => i !== idx),
-                                        ),
-                                    },
-                                    "×",
+                                    "span",
+                                    { className: "seal-small" },
+                                    t("outlineSaveToKbHint"),
                                   ),
+                                  saveToKb &&
+                                    h(
+                                      React.Fragment,
+                                      null,
+                                      h(
+                                        "label",
+                                        null,
+                                        t("outlineSaveToKbTitle"),
+                                        h("input", {
+                                          value: kbUploadTitle,
+                                          placeholder: selectedRow.title,
+                                          onChange: (e: any) =>
+                                            setKbUploadTitle(e.target.value),
+                                        }),
+                                      ),
+                                      h(
+                                        "div",
+                                        { className: "seal-grid-2" },
+                                        h(
+                                          "label",
+                                          null,
+                                          t("outlineSaveToKbType"),
+                                          h(
+                                            "select",
+                                            {
+                                              value: kbUploadType,
+                                              onChange: (e: any) =>
+                                                setKbUploadType(e.target.value),
+                                            },
+                                            ...kbTypeOptions.map((opt) =>
+                                              h(
+                                                "option",
+                                                { key: opt, value: opt },
+                                                opt,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        h(
+                                          "label",
+                                          null,
+                                          t("outlineSaveToKbValidUntil"),
+                                          h("input", {
+                                            value: kbUploadValidUntil,
+                                            placeholder: t(
+                                              "outlineSaveToKbValidUntilPlaceholder",
+                                            ),
+                                            onChange: (e: any) =>
+                                              setKbUploadValidUntil(
+                                                e.target.value,
+                                              ),
+                                          }),
+                                        ),
+                                      ),
+                                    ),
+                                ),
+                              h(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "seal-btn-primary seal-btn-sm",
+                                  disabled: action.busy,
+                                  onClick: () =>
+                                    void handleUploadMaterial(
+                                      selectedRow.id,
+                                      selectedRow.title,
+                                    ),
+                                },
+                                t(
+                                  canSyncToKb && saveToKb
+                                    ? "outlineUploadAndSaveKbBtn"
+                                    : "outlineUploadBtn",
                                 ),
                               ),
                             ),
-                          h(
-                            "label",
-                            null,
-                            t("outlineUploadPathLabel"),
-                            h("input", {
-                              value: uploadPath,
-                              placeholder: t("outlineUploadPathPlaceholder"),
-                              onChange: (e: any) =>
-                                setUploadPath(e.target.value),
-                            }),
-                          ),
-                          h(
-                            "button",
-                            {
-                              type: "button",
-                              className: "seal-btn-primary seal-btn-sm",
-                              disabled:
-                                action.busy || uploadTargets.length === 0,
-                              onClick: () =>
-                                void handleUploadMaterial(selectedRow.id),
-                            },
-                            t("outlineUploadBtn"),
-                          ),
-                        ),
-                        h(
-                          "div",
-                          { className: "seal-row" },
-                          h("input", {
-                            id: `missing-${selectedRow.id}`,
-                            type: "checkbox",
-                            checked: Boolean(selectedRow.materialMissing),
-                            onChange: (e: any) =>
-                              commitEdit(
-                                updateOutlineNode(
-                                  draftOutline,
-                                  selectedRow.id,
-                                  { materialMissing: Boolean(e.target.checked) },
-                                  { updatedAt: nowIso, updatedBy: "human" },
-                                ),
-                              ),
-                          }),
-                          h(
-                            "span",
-                            { className: "seal-small" },
-                            t("outlineMaterialMissingLabel"),
-                          ),
-                        ),
-                        h(
-                          "label",
-                          null,
-                          t("outlineMaterialNoteLabel"),
-                          h("input", {
-                            value: selectedRow.materialNote ?? "",
-                            placeholder: t("outlineMaterialNotePlaceholder"),
-                            onChange: (e: any) =>
-                              commitEdit(
-                                updateOutlineNode(
-                                  draftOutline,
-                                  selectedRow.id,
-                                  { materialNote: e.target.value || undefined },
-                                  { updatedAt: nowIso, updatedBy: "human" },
-                                ),
-                              ),
-                          }),
                         ),
                       ),
                       h(
                         "div",
                         { className: "seal-stack-sm seal-divider" },
-                        h("h3", null, t("outlineReqsSection")),
-                        allRequirements.length === 0
-                          ? h("p", { className: "seal-small" }, t("outlineReqsNone"))
+                        h(
+                          "div",
+                          { className: "seal-row seal-between" },
+                          h("h3", null, t("outlineReqsSection")),
+                          allRequirements.length > 0 &&
+                            h(
+                              "button",
+                              {
+                                type: "button",
+                                className: "seal-btn-ghost seal-btn-sm",
+                                onClick: () =>
+                                  setReqPickerOpen((prev) => !prev),
+                              },
+                              `${t("outlineReqsAdjust")} (${selectedRow.requirementIds?.length ?? 0}/${allRequirements.length}) ${reqPickerOpen ? "▴" : "▾"}`,
+                            ),
+                        ),
+                        selectedRow.resolvedRequirements.length === 0
+                          ? h(
+                              "p",
+                              { className: "seal-small" },
+                              allRequirements.length === 0
+                                ? t("outlineReqsNone")
+                                : t("outlineReqsEmptyNode"),
+                            )
                           : h(
                               "div",
-                              { className: "seal-outline-req-list" },
-                              ...allRequirements.map((req) => {
-                                const checked = (
-                                  selectedRow.requirementIds ?? []
-                                ).includes(req.id);
-                                const uncovered =
-                                  req.mustRespond && !coveredReqIds.has(req.id);
-                                return h(
-                                  "label",
+                              { className: "seal-stack-sm" },
+                              ...selectedRow.resolvedRequirements.map((req) =>
+                                h(
+                                  "div",
                                   {
                                     key: req.id,
-                                    className: "seal-outline-req-item",
+                                    className: "seal-outline-req-chip",
                                   },
-                                  h("input", {
-                                    type: "checkbox",
-                                    checked,
-                                    onChange: () => {
-                                      const current =
-                                        selectedRow.requirementIds ?? [];
-                                      const nextIds = checked
-                                        ? current.filter((id) => id !== req.id)
-                                        : [...current, req.id];
-                                      commitEdit(
-                                        updateOutlineNode(
-                                          draftOutline,
-                                          selectedRow.id,
-                                          { requirementIds: nextIds },
-                                          { updatedAt: nowIso, updatedBy: "human" },
-                                        ),
-                                      );
-                                    },
-                                  }),
                                   h(
                                     "div",
-                                    { className: "seal-stack-sm" },
+                                    { className: "seal-row seal-between" },
                                     h(
                                       "div",
                                       { className: "seal-row" },
-                                      h("strong", { className: "seal-small" }, req.id),
+                                      h(
+                                        "strong",
+                                        { className: "seal-small" },
+                                        req.id,
+                                      ),
                                       req.mustRespond &&
                                         h(
                                           "span",
                                           { className: "seal-badge" },
                                           t("mustRespond"),
                                         ),
-                                      uncovered &&
-                                        h(
-                                          "span",
-                                          { className: "seal-badge seal-badge-warn" },
-                                          t("outlineReqUncoveredTag"),
-                                        ),
                                     ),
-                                    h("span", { className: "seal-small" }, req.text),
+                                    h(
+                                      "button",
+                                      {
+                                        type: "button",
+                                        className: "seal-btn-ghost seal-btn-sm",
+                                        "aria-label": `${t("outlineUnbind")} ${req.id}`,
+                                        onClick: () =>
+                                          commitEdit(
+                                            updateOutlineNode(
+                                              draftOutline,
+                                              selectedRow.id,
+                                              {
+                                                requirementIds: (
+                                                  selectedRow.requirementIds ??
+                                                  []
+                                                ).filter((id) => id !== req.id),
+                                              },
+                                              {
+                                                updatedAt: nowIso,
+                                                updatedBy: "human",
+                                              },
+                                            ),
+                                          ),
+                                      },
+                                      "×",
+                                    ),
                                   ),
-                                );
-                              }),
+                                  h(
+                                    "span",
+                                    { className: "seal-small" },
+                                    req.text,
+                                  ),
+                                ),
+                              ),
                             ),
+                        reqPickerOpen &&
+                          allRequirements.length > 0 &&
+                          h(
+                            "div",
+                            { className: "seal-stack-sm" },
+                            h("input", {
+                              value: reqSearch,
+                              placeholder: t("outlineReqsSearchPlaceholder"),
+                              onChange: (e: any) =>
+                                setReqSearch(e.target.value),
+                            }),
+                            h(
+                              "div",
+                              { className: "seal-outline-req-list" },
+                              ...allRequirements
+                                .filter((req) => {
+                                  const q = reqSearch.trim().toLowerCase();
+                                  if (!q) return true;
+                                  return (
+                                    req.id.toLowerCase().includes(q) ||
+                                    req.text.toLowerCase().includes(q)
+                                  );
+                                })
+                                .sort((a, b) => {
+                                  const aChecked = Number(
+                                    (selectedRow.requirementIds ?? []).includes(
+                                      a.id,
+                                    ),
+                                  );
+                                  const bChecked = Number(
+                                    (selectedRow.requirementIds ?? []).includes(
+                                      b.id,
+                                    ),
+                                  );
+                                  if (aChecked !== bChecked)
+                                    return bChecked - aChecked;
+                                  return (
+                                    Number(b.mustRespond) -
+                                    Number(a.mustRespond)
+                                  );
+                                })
+                                .map((req) => {
+                                  const checked = (
+                                    selectedRow.requirementIds ?? []
+                                  ).includes(req.id);
+                                  const uncovered =
+                                    req.mustRespond &&
+                                    !coveredReqIds.has(req.id);
+                                  return h(
+                                    "label",
+                                    {
+                                      key: req.id,
+                                      className: "seal-outline-req-item",
+                                    },
+                                    h("input", {
+                                      type: "checkbox",
+                                      checked,
+                                      onChange: () => {
+                                        const current =
+                                          selectedRow.requirementIds ?? [];
+                                        const nextIds = checked
+                                          ? current.filter(
+                                              (id) => id !== req.id,
+                                            )
+                                          : [...current, req.id];
+                                        commitEdit(
+                                          updateOutlineNode(
+                                            draftOutline,
+                                            selectedRow.id,
+                                            { requirementIds: nextIds },
+                                            {
+                                              updatedAt: nowIso,
+                                              updatedBy: "human",
+                                            },
+                                          ),
+                                        );
+                                      },
+                                    }),
+                                    h(
+                                      "div",
+                                      {
+                                        className: "seal-stack-sm",
+                                        style: { flex: "1 1 0", minWidth: 0 },
+                                      },
+                                      h(
+                                        "div",
+                                        { className: "seal-row" },
+                                        h(
+                                          "strong",
+                                          { className: "seal-small" },
+                                          req.id,
+                                        ),
+                                        req.mustRespond &&
+                                          h(
+                                            "span",
+                                            { className: "seal-badge" },
+                                            t("mustRespond"),
+                                          ),
+                                        uncovered &&
+                                          h(
+                                            "span",
+                                            {
+                                              className:
+                                                "seal-badge seal-badge-warn",
+                                            },
+                                            t("outlineReqUncoveredTag"),
+                                          ),
+                                      ),
+                                      h(
+                                        "span",
+                                        { className: "seal-small" },
+                                        req.text,
+                                      ),
+                                    ),
+                                  );
+                                }),
+                            ),
+                          ),
                       ),
                       h(
                         "div",
                         { className: "seal-stack-sm seal-divider" },
-                        h("h3", null, t("outlineAiSection")),
-                        !payload.binding?.sessionId
-                          ? h(
-                              "p",
-                              { className: "seal-small" },
-                              t("outlineNoSessionHint"),
-                            )
-                          : h(
-                              React.Fragment,
-                              null,
-                              h("textarea", {
-                                value: aiInstruction,
-                                placeholder: t("outlineAiPlaceholder"),
+                        h(
+                          "label",
+                          null,
+                          t("outlineNodeNote"),
+                          h("textarea", {
+                            rows: 2,
+                            value: selectedRow.note ?? "",
+                            placeholder: t("outlineNodeNotePlaceholder"),
+                            onChange: (e: any) =>
+                              commitEdit(
+                                updateOutlineNode(
+                                  draftOutline,
+                                  selectedRow.id,
+                                  { note: e.target.value || undefined },
+                                  { updatedAt: nowIso, updatedBy: "human" },
+                                ),
+                              ),
+                          }),
+                        ),
+                        payload.binding?.sessionId &&
+                          h(
+                            "div",
+                            { className: "seal-stack-sm" },
+                            h("textarea", {
+                              rows: 2,
+                              value: aiInstruction,
+                              placeholder: t("outlineAiPlaceholder"),
+                              onChange: (e: any) =>
+                                setAiInstruction(e.target.value),
+                            }),
+                            h(
+                              "button",
+                              {
+                                type: "button",
+                                className: "seal-btn-sm",
+                                disabled:
+                                  action.busy || !aiInstruction.trim(),
+                                onClick: () =>
+                                  action.run(async () => {
+                                    const prompt = buildOutlineRevisionPrompt(
+                                      { name: payload.project.name },
+                                      selectedRow,
+                                      aiInstruction,
+                                    );
+                                    await send(
+                                      payload.binding!.sessionId!,
+                                      prompt,
+                                    );
+                                    setAiInstruction("");
+                                  }, t("sent")),
+                              },
+                              t("outlineAiSendBtn"),
+                            ),
+                          ),
+                      ),
+                      h(
+                        "details",
+                        { className: "seal-outline-details" },
+                        h("summary", null, t("outlineMoreSettings")),
+                        h(
+                          "div",
+                          { className: "seal-stack-sm" },
+                          h(
+                            "label",
+                            null,
+                            t("outlineNodeKind"),
+                            h(
+                              "select",
+                              {
+                                value: selectedRow.kind,
+                                disabled: selectedLocked,
                                 onChange: (e: any) =>
-                                  setAiInstruction(e.target.value),
-                              }),
+                                  commitEdit(
+                                    updateOutlineNode(
+                                      draftOutline,
+                                      selectedRow.id,
+                                      {
+                                        kind: e.target
+                                          .value as OutlineNodeKind,
+                                      },
+                                      {
+                                        updatedAt: nowIso,
+                                        updatedBy: "human",
+                                      },
+                                    ),
+                                  ),
+                              },
                               h(
-                                "button",
-                                {
-                                  type: "button",
-                                  className: "seal-btn-sm",
-                                  disabled:
-                                    action.busy || !aiInstruction.trim(),
-                                  onClick: () =>
-                                    action.run(async () => {
-                                      const prompt = buildOutlineRevisionPrompt(
-                                        { name: payload.project.name },
-                                        selectedRow,
-                                        aiInstruction,
-                                      );
-                                      await send(
-                                        payload.binding!.sessionId!,
-                                        prompt,
-                                      );
-                                      setAiInstruction("");
-                                    }, t("sent")),
-                                },
-                                t("outlineAiSendBtn"),
+                                "option",
+                                { value: "template" },
+                                t("outlineKindTemplate"),
+                              ),
+                              h(
+                                "option",
+                                { value: "authored" },
+                                t("outlineKindAuthored"),
+                              ),
+                              h(
+                                "option",
+                                { value: "attachment" },
+                                t("outlineKindAttachment"),
                               ),
                             ),
+                          ),
+                          selectedRow.kind === "template" &&
+                            h(
+                              "label",
+                              { className: "seal-inline-check" },
+                              h("input", {
+                                type: "checkbox",
+                                checked: Boolean(selectedRow.optional),
+                                disabled: selectedLocked,
+                                onChange: (e: any) =>
+                                  commitEdit(
+                                    updateOutlineNode(
+                                      draftOutline,
+                                      selectedRow.id,
+                                      { optional: Boolean(e.target.checked) },
+                                      {
+                                        updatedAt: nowIso,
+                                        updatedBy: "human",
+                                      },
+                                    ),
+                                  ),
+                              }),
+                              h(
+                                "span",
+                                { className: "seal-small" },
+                                t("outlineNodeOptional"),
+                              ),
+                            ),
+                          h(
+                            "label",
+                            { className: "seal-inline-check" },
+                            h("input", {
+                              type: "checkbox",
+                              checked: Boolean(selectedRow.materialMissing),
+                              onChange: (e: any) =>
+                                commitEdit(
+                                  updateOutlineNode(
+                                    draftOutline,
+                                    selectedRow.id,
+                                    {
+                                      materialMissing: Boolean(
+                                        e.target.checked,
+                                      ),
+                                    },
+                                    { updatedAt: nowIso, updatedBy: "human" },
+                                  ),
+                                ),
+                            }),
+                            h(
+                              "span",
+                              { className: "seal-small" },
+                              t("outlineMaterialMissingLabel"),
+                            ),
+                          ),
+                          h(
+                            "label",
+                            null,
+                            t("outlineMaterialNoteLabel"),
+                            h("input", {
+                              value: selectedRow.materialNote ?? "",
+                              placeholder: t("outlineMaterialNotePlaceholder"),
+                              onChange: (e: any) =>
+                                commitEdit(
+                                  updateOutlineNode(
+                                    draftOutline,
+                                    selectedRow.id,
+                                    {
+                                      materialNote:
+                                        e.target.value || undefined,
+                                    },
+                                    { updatedAt: nowIso, updatedBy: "human" },
+                                  ),
+                                ),
+                            }),
+                          ),
+                        ),
                       ),
                     )
                   : h(
@@ -7174,6 +7731,113 @@ currentWindow.__ModuleLoader__.load({
                     ),
               ),
             ),
+            lightbox &&
+              h(
+                "div",
+                {
+                  className: "seal-lightbox-backdrop",
+                  role: "dialog",
+                  "aria-modal": "true",
+                  onClick: () => setLightbox(null),
+                },
+                h(
+                  "div",
+                  {
+                    className: "seal-lightbox-dialog",
+                    onClick: (e: any) => e.stopPropagation(),
+                  },
+                  h(
+                    "div",
+                    { className: "seal-row seal-between" },
+                    h(
+                      "div",
+                      { className: "seal-row" },
+                      h("strong", null, lightbox.title),
+                      lightbox.images.length > 1 &&
+                        h(
+                          "span",
+                          { className: "seal-small" },
+                          `${lightbox.index + 1} / ${lightbox.images.length}`,
+                        ),
+                    ),
+                    h(
+                      "div",
+                      { className: "seal-row" },
+                      lightbox.images.length > 1 &&
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            className: "seal-btn-sm",
+                            disabled: lightbox.index === 0,
+                            onClick: () =>
+                              setLightbox((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      index: Math.max(0, prev.index - 1),
+                                    }
+                                  : null,
+                              ),
+                          },
+                          t("previous"),
+                        ),
+                      lightbox.images.length > 1 &&
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            className: "seal-btn-sm",
+                            disabled:
+                              lightbox.index >= lightbox.images.length - 1,
+                            onClick: () =>
+                              setLightbox((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      index: Math.min(
+                                        prev.images.length - 1,
+                                        prev.index + 1,
+                                      ),
+                                    }
+                                  : null,
+                              ),
+                          },
+                          t("next"),
+                        ),
+                      lightbox.rawHref &&
+                        h(
+                          "a",
+                          {
+                            className: "seal-link seal-btn-sm",
+                            href: lightbox.rawHref,
+                            target: "_blank",
+                            rel: "noreferrer",
+                          },
+                          t("outlineLightboxOpenRaw"),
+                        ),
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          className: "seal-btn-sm",
+                          onClick: () => setLightbox(null),
+                        },
+                        t("outlineLightboxClose"),
+                      ),
+                    ),
+                  ),
+                  h(
+                    "div",
+                    { className: "seal-lightbox-body" },
+                    h("img", {
+                      src: lightbox.images[lightbox.index],
+                      className: "seal-lightbox-img",
+                      alt: lightbox.title,
+                    }),
+                  ),
+                ),
+              ),
           );
         }
 

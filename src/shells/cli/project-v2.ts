@@ -554,6 +554,19 @@ async function loadFactContext(
         const files = asStringList(record.fields.files);
         const hasFiles = files.length > 0;
         kbRecordHasFiles.set(record.id, hasFiles);
+        const entryForRevision = {
+          id: record.id,
+          kind: record.kind,
+          fields: record.fields,
+          body: record.body,
+          verified: record.verified,
+          verifiedFields: record.verifiedFields,
+          issues: record.issues,
+        };
+        const holderVal =
+          record.fields.type === "人员证书"
+            ? record.fields.employer
+            : record.fields.holder;
         kbRecords.push({
           id: record.id,
           ...(typeof record.fields.title === "string"
@@ -566,6 +579,18 @@ async function loadFactContext(
           validity: record.validity,
           subject: record.subject,
           hasFiles,
+          ...(files.length > 0 ? { files } : {}),
+          ...(typeof holderVal === "string" && holderVal
+            ? { holder: holderVal }
+            : {}),
+          ...(typeof record.fields.validUntil === "string" &&
+          record.fields.validUntil
+            ? { validUntil: record.fields.validUntil }
+            : {}),
+          ...(typeof record.fields.number === "string" && record.fields.number
+            ? { number: record.fields.number }
+            : {}),
+          revision: sha256Hex(JSON.stringify(entryForRevision)),
         });
       }
       const citedIds = new Set(

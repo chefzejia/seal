@@ -1409,12 +1409,112 @@ export class WorkbenchHost {
           new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes);
         }
 
-        const binding: OutlineEvidenceBinding = {
+        const saveToKb = input.saveToKb === true;
+        let binding: OutlineEvidenceBinding = {
           source: "material",
           ref: relRef,
           label,
           ...(renderedPages ? { renderedPages } : {}),
         };
+        let syncedKbId: string | undefined;
+
+        if (saveToKb) {
+          const vaultId = snapshot.project.vaultId;
+          if (!vaultId) {
+            throw new Error("当前项目未关联企业知识库，无法同步存入知识库");
+          }
+          const kbRoot = knowledgeBasesRoot();
+          assertKnowledgeBaseTree(kbRoot);
+          const kbTitle =
+            typeof input.kbTitle === "string" && input.kbTitle.trim()
+              ? input.kbTitle.trim()
+              : label;
+          const kbType =
+            typeof input.kbType === "string" && input.kbType.trim()
+              ? input.kbType.trim()
+              : "其他";
+          const kbValidUntil =
+            typeof input.kbValidUntil === "string" && input.kbValidUntil.trim()
+              ? input.kbValidUntil.trim()
+              : "不适用";
+          const kbHolderInput =
+            typeof input.kbHolder === "string" && input.kbHolder.trim()
+              ? input.kbHolder.trim()
+              : "";
+          const kbTextBody =
+            ext === ".txt" || ext === ".md"
+              ? new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes)
+              : "";
+
+          const createdRecord = await serializedKnowledgeBase(
+            kbRoot,
+            async () => {
+              const kb = new KnowledgeBase(this.host, kbRoot);
+              const subject = await kb.get(vaultId, "subject");
+              const holder =
+                kbHolderInput ||
+                (typeof subject.fields.legalName === "string"
+                  ? subject.fields.legalName.trim()
+                  : "");
+              const fields: Record<string, string> = {
+                type: kbType,
+                title: kbTitle,
+                validUntil: kbValidUntil,
+                ...(holder ? { holder } : {}),
+              };
+              const created = await kb.save(vaultId, {
+                action: "create",
+                kind: "record",
+                fields,
+                body: kbTextBody,
+              });
+              try {
+                if (renderedPages && renderedPages.length > 0) {
+                  for (let i = 0; i < renderedPages.length; i++) {
+                    const pageAbs = path.join(physicalRoot, renderedPages[i]);
+                    const pageBytes = new Uint8Array(
+                      await fs.readFile(pageAbs),
+                    );
+                    await kb.save(vaultId, {
+                      action: "attach_file",
+                      kind: "record",
+                      id: created.id,
+                      file: {
+                        fileName: `${base}-p${i + 1}.png`,
+                        bytes: pageBytes,
+                      },
+                    });
+                  }
+                }
+                await kb.save(vaultId, {
+                  action: "attach_file",
+                  kind: "record",
+                  id: created.id,
+                  file: {
+                    fileName: `${base}${ext}`,
+                    bytes: sourceBytes,
+                  },
+                });
+                return await kb.verify(vaultId, "record", created.id, []);
+              } catch (kbError) {
+                await kb
+                  .deleteEntry(vaultId, "record", created.id, "human")
+                  .catch(() => {});
+                throw kbError;
+              }
+            },
+          );
+          syncedKbId = createdRecord.id;
+          binding = {
+            source: "kb",
+            ref: createdRecord.id,
+            label: kbTitle,
+          };
+          await fs.rm(copiedPath, { force: true }).catch(() => {});
+          await fs
+            .rm(pagesDir, { recursive: true, force: true })
+            .catch(() => {});
+        }
 
         if (nodeId && snapshot.outline.kind === "value") {
           const nextOutline = bindEvidenceToNode(
@@ -1435,7 +1535,12 @@ export class WorkbenchHost {
         }
 
         const refreshed = await this.readOutlineGetUnlocked(root, id);
-        return { ...refreshed, sessionBinding: refreshed.binding, binding };
+        return {
+          ...refreshed,
+          sessionBinding: refreshed.binding,
+          binding,
+          ...(syncedKbId ? { syncedKbId } : {}),
+        };
       } catch (error) {
         await fs.rm(copiedPath, { force: true }).catch(() => {});
         await fs.rm(pagesDir, { recursive: true, force: true }).catch(() => {});
@@ -1443,6 +1548,194 @@ export class WorkbenchHost {
           `材料上传失败：${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    });
+  }
+
+  async outlineVerifyKb(input: Record<string, unknown>) {
+    const id = identifier(input.projectId);
+    const root = await this.projectRoot(id);
+    const kbId = required(input.kbId, "知识库记录编号");
+    const expectedKbRevision = required(input.expectedKbRevision, "记录修订版本");
+    return serializedProject(root, async () => {
+      const snapshot = await readProjectSnapshot(this.host, root);
+      const vaultId = snapshot.project.vaultId;
+      if (!vaultId) {
+        throw new Error("当前项目未关联企业知识库");
+      }
+      const kbRoot = knowledgeBasesRoot();
+      assertKnowledgeBaseTree(kbRoot);
+      await serializedKnowledgeBase(kbRoot, async () => {
+        const kb = new KnowledgeBase(this.host, kbRoot);
+        const current = await kb.get(vaultId, "record", kbId);
+        if (sha256Hex(JSON.stringify(current)) !== expectedKbRevision) {
+          throw new Error("版本冲突：知识库记录已变化，请刷新后重新核实");
+        }
+        await kb.verify(vaultId, "record", kbId, []);
+      });
+      return this.readOutlineGetUnlocked(root, id);
+    });
+  }
+
+  async outlinePromoteMaterialToKb(input: Record<string, unknown>) {
+    const id = identifier(input.projectId);
+    const root = await this.projectRoot(id);
+    const expectedRevision = required(
+      input.expectedRevision ?? input.revision,
+      "修订版本",
+    );
+    const nodeId = required(input.nodeId, "节点编号");
+    const materialRef = required(input.materialRef, "材料路径");
+    if (!isSafeMaterialPath(materialRef)) {
+      throw new Error("材料路径不安全");
+    }
+    return serializedProject(root, async () => {
+      const snapshot = await readProjectSnapshot(this.host, root);
+      if (snapshot.revision !== expectedRevision) {
+        throw new Error("版本冲突：大纲或资料已变化，请刷新后重试");
+      }
+      const vaultId = snapshot.project.vaultId;
+      if (!vaultId) {
+        throw new Error("当前项目未关联企业知识库，无法同步存入知识库");
+      }
+      if (snapshot.outline.kind !== "value") {
+        throw new Error("当前项目尚未生成编制大纲");
+      }
+      const node = snapshot.outline.outline.nodes.find((n) => n.id === nodeId);
+      if (!node) {
+        throw new Error(`目标大纲节点不存在：${nodeId}`);
+      }
+      const existingBinding = (node.evidence ?? []).find(
+        (ev) => ev.source === "material" && ev.ref === materialRef,
+      );
+      if (!existingBinding) {
+        throw new Error("节点上未找到对应的本地材料绑定");
+      }
+
+      const physicalRoot = await fs.realpath(root);
+      const materialsRoot = await fs.realpath(
+        path.join(physicalRoot, "materials"),
+      );
+      const absTarget = await regular(path.join(physicalRoot, materialRef));
+      if (!absTarget.startsWith(materialsRoot + path.sep)) {
+        throw new Error("材料路径越界");
+      }
+      const sourceBytes = new Uint8Array(await fs.readFile(absTarget));
+      const ext = path.extname(materialRef).toLowerCase();
+      const base =
+        path
+          .basename(materialRef, ext)
+          .replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, "")
+          .replace(/[^\p{L}\p{N}_-]+/gu, "_")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 60) || "material";
+      const kbTitle =
+        typeof input.kbTitle === "string" && input.kbTitle.trim()
+          ? input.kbTitle.trim()
+          : existingBinding.label || node.title || path.basename(materialRef);
+      const kbType =
+        typeof input.kbType === "string" && input.kbType.trim()
+          ? input.kbType.trim()
+          : "其他";
+      const kbValidUntil =
+        typeof input.kbValidUntil === "string" && input.kbValidUntil.trim()
+          ? input.kbValidUntil.trim()
+          : "不适用";
+      const kbHolderInput =
+        typeof input.kbHolder === "string" && input.kbHolder.trim()
+          ? input.kbHolder.trim()
+          : "";
+      const kbTextBody =
+        ext === ".txt" || ext === ".md"
+          ? new TextDecoder("utf-8", { fatal: true }).decode(sourceBytes)
+          : "";
+
+      const pageBuffers: Uint8Array[] = [];
+      for (const pageRef of existingBinding.renderedPages ?? []) {
+        if (!isSafeMaterialPath(pageRef)) {
+          throw new Error("PDF 渲染页路径不安全");
+        }
+        const absPage = await regular(path.join(physicalRoot, pageRef));
+        if (!absPage.startsWith(materialsRoot + path.sep)) {
+          throw new Error("PDF 渲染页路径越界");
+        }
+        pageBuffers.push(new Uint8Array(await fs.readFile(absPage)));
+      }
+
+      const kbRoot = knowledgeBasesRoot();
+      assertKnowledgeBaseTree(kbRoot);
+      const createdRecord = await serializedKnowledgeBase(kbRoot, async () => {
+        const kb = new KnowledgeBase(this.host, kbRoot);
+        const subject = await kb.get(vaultId, "subject");
+        const holder =
+          kbHolderInput ||
+          (typeof subject.fields.legalName === "string"
+            ? subject.fields.legalName.trim()
+            : "");
+        const created = await kb.save(vaultId, {
+          action: "create",
+          kind: "record",
+          fields: {
+            type: kbType,
+            title: kbTitle,
+            validUntil: kbValidUntil,
+            ...(holder ? { holder } : {}),
+          },
+          body: kbTextBody,
+        });
+        try {
+          for (let i = 0; i < pageBuffers.length; i++) {
+            await kb.save(vaultId, {
+              action: "attach_file",
+              kind: "record",
+              id: created.id,
+              file: {
+                fileName: `${base}-p${i + 1}.png`,
+                bytes: pageBuffers[i],
+              },
+            });
+          }
+          await kb.save(vaultId, {
+            action: "attach_file",
+            kind: "record",
+            id: created.id,
+            file: {
+              fileName: `${base}${ext}`,
+              bytes: sourceBytes,
+            },
+          });
+          return await kb.verify(vaultId, "record", created.id, []);
+        } catch (kbError) {
+          await kb
+            .deleteEntry(vaultId, "record", created.id, "human")
+            .catch(() => {});
+          throw kbError;
+        }
+      });
+
+      const nextNodes = snapshot.outline.outline.nodes.map((item) => {
+        if (item.id !== nodeId) return item;
+        const remaining = (item.evidence ?? []).filter(
+          (ev) => !(ev.source === "material" && ev.ref === materialRef),
+        );
+        const kbBinding: OutlineEvidenceBinding = {
+          source: "kb",
+          ref: createdRecord.id,
+          label: kbTitle,
+        };
+        return {
+          ...item,
+          materialMissing: false,
+          evidence: [...remaining, kbBinding],
+        };
+      });
+      await writeOutlineFile(this.host, root, snapshot.project, {
+        ...snapshot.outline.outline,
+        nodes: nextNodes,
+        updatedAt: new Date().toISOString(),
+        updatedBy: "human",
+      });
+      const refreshed = await this.readOutlineGetUnlocked(root, id);
+      return { ...refreshed, syncedKbId: createdRecord.id };
     });
   }
 
@@ -1942,6 +2235,9 @@ export function registerWorkbenchRoutes(
           outline_save: (input) => service.outlineSave(input),
           outline_upload_material: (input) =>
             service.outlineUploadMaterial(input),
+          outline_verify_kb: (input) => service.outlineVerifyKb(input),
+          outline_promote_material_to_kb: (input) =>
+            service.outlinePromoteMaterialToKb(input),
           outline_confirm: (input) => service.outlineConfirm(input),
         };
         if (!handlers[operation]) throw new Error("操作不存在");
