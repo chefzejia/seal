@@ -166,6 +166,116 @@ test('replaceVisibleRange replaces thousands of fragmented runs in linear time w
   assert.ok(elapsedMs < 500, `replaceVisibleRange across ${runCount} runs took ${elapsedMs.toFixed(1)}ms`);
 });
 
+test('replaceVisibleRange preserves unchanged date separators, inherits blank slot underlines, and never invents underlines', () => {
+  const maskFor = (xml: string) => {
+    const props = visibleRunProperties(xml);
+    return Array.from(editableText(xml)).map((ch, idx) => ({
+      ch,
+      u: hasU(props[idx] ?? ''),
+      yellow: /w:val="yellow"/.test(props[idx] ?? ''),
+      b: /<w:b\b/.test(props[idx] ?? ''),
+      i: /<w:i\b/.test(props[idx] ?? ''),
+    }));
+  };
+  const hasU = (rPr: string) => /<w:u\b/.test(rPr) && !/<w:u\b[^>]*w:val="none"/.test(rPr);
+
+  const uRun = (t: string) => `<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const pRun = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+
+  // 1 & 2. Multi-run underlined date: 2026, 11, 27 get underline; 年, 月, 日 stay plain; yellow: true marks ALL chars yellow
+  const dateXml = `<w:p>${uRun('    ')}${pRun('年')}${uRun('  ')}${pRun('月')}${uRun('  ')}${pRun('日')}</w:p>`;
+  const datePlain = replaceVisibleRange(dateXml, 0, editableText(dateXml).length, '2026年11月27日', false);
+  assert.equal(editableText(datePlain), '2026年11月27日');
+  assert.deepEqual(inspectRuns(datePlain).emptyRuns, []);
+  assert.deepEqual(maskFor(datePlain).map(m => [m.ch, m.u, m.yellow]), [
+    ['2', true, false], ['0', true, false], ['2', true, false], ['6', true, false],
+    ['年', false, false],
+    ['1', true, false], ['1', true, false],
+    ['月', false, false],
+    ['2', true, false], ['7', true, false],
+    ['日', false, false],
+  ]);
+
+  const dateYellow = replaceVisibleRange(dateXml, 0, editableText(dateXml).length, '2026年11月27日', true);
+  assert.equal(editableText(dateYellow), '2026年11月27日');
+  assert.deepEqual(inspectRuns(dateYellow).emptyRuns, []);
+  assert.deepEqual(inspectRuns(dateYellow).yellowEmptyRuns, []);
+  assert.deepEqual(maskFor(dateYellow).map(m => [m.ch, m.u, m.yellow]), [
+    ['2', true, true], ['0', true, true], ['2', true, true], ['6', true, true],
+    ['年', false, true],
+    ['1', true, true], ['1', true, true],
+    ['月', false, true],
+    ['2', true, true], ['7', true, true],
+    ['日', false, true],
+  ]);
+
+  // 3. Multi-slot date range: all 6 number groups underlined, 年/月/日至/年/月/日 plain
+  const rangeXml = `<w:p>${uRun('    ')}${pRun('年')}${uRun('  ')}${pRun('月')}${uRun('  ')}${pRun('日至')}${uRun('    ')}${pRun('年')}${uRun('  ')}${pRun('月')}${uRun('  ')}${pRun('日')}</w:p>`;
+  const rangeOut = replaceVisibleRange(rangeXml, 0, editableText(rangeXml).length, '2026年01月01日至2026年12月31日', false);
+  assert.equal(editableText(rangeOut), '2026年01月01日至2026年12月31日');
+  assert.deepEqual(maskFor(rangeOut).filter(m => !m.u).map(m => m.ch).join(''), '年月日截至'.slice(0, 0) + '年月日至年月日');
+
+  // 4. Label + underlined blank: label stays plain, filled text gets underline
+  const labelBlank = `<w:p>${pRun('项目名称：')}${uRun('    ')}</w:p>`;
+  const labelOut = replaceVisibleRange(labelBlank, 0, editableText(labelBlank).length, '项目名称：防爆电梯', false);
+  assert.equal(editableText(labelOut), '项目名称：防爆电梯');
+  assert.deepEqual(maskFor(labelOut).map(m => [m.ch, m.u]), [
+    ['项', false], ['目', false], ['名', false], ['称', false], ['：', false],
+    ['防', true], ['爆', true], ['电', true], ['梯', true],
+  ]);
+
+  // 5. Mixed leading plain space + underlined spaces in single slot -> inherits underline
+  const mixedSlot = `<w:p>${pRun(' ')}${uRun('    ')}</w:p>`;
+  const mixedOut = replaceVisibleRange(mixedSlot, 0, editableText(mixedSlot).length, '中标公司', false);
+  assert.equal(editableText(mixedOut), '中标公司');
+  assert.deepEqual(maskFor(mixedOut).every(m => m.u), true);
+
+  // 6. Plain underscores never invent underline
+  const plainDate = `<w:p>${pRun('____')}${pRun('年')}${pRun('__')}${pRun('月')}${pRun('__')}${pRun('日')}</w:p>`;
+  const plainOut = replaceVisibleRange(plainDate, 0, editableText(plainDate).length, '2026年11月27日', false);
+  assert.equal(editableText(plainOut), '2026年11月27日');
+  assert.deepEqual(maskFor(plainOut).every(m => !m.u), true);
+
+  // 7. Multi-run highlight clearing (yellow: null with same text) preserves each run style
+  const yellowMixed = '<w:p><w:r><w:rPr><w:b/><w:highlight w:val="yellow"/></w:rPr><w:t>甲</w:t></w:r><w:r><w:rPr><w:i/><w:u w:val="single"/><w:highlight w:val="yellow"/></w:rPr><w:t>乙</w:t></w:r></w:p>';
+  const cleared = replaceVisibleRange(yellowMixed, 0, 2, '甲乙', null);
+  assert.equal(editableText(cleared), '甲乙');
+  assert.deepEqual(inspectRuns(cleared).emptyRuns, []);
+  assert.deepEqual(maskFor(cleared), [
+    { ch: '甲', u: false, yellow: false, b: true, i: false },
+    { ch: '乙', u: true, yellow: false, b: false, i: true },
+  ]);
+
+  // 8. Partial-range suffix insertion before afterRaw and trailing drawing before afterRaw
+  assert.equal(editableText(replaceVisibleRange('<w:p><w:r><w:t>AB</w:t></w:r></w:p>', 0, 1, 'AX', false)), 'AXB');
+  const withDrawing = replaceVisibleRange('<w:p><w:r><w:t>AB</w:t></w:r></w:p>', 0, 1, 'A', false, '<w:drawing/>');
+  assert.ok(withDrawing.indexOf('<w:drawing/>') > withDrawing.indexOf('A') && withDrawing.indexOf('<w:drawing/>') < withDrawing.indexOf('B'));
+
+  // 9. Surrogate boundary split fails identically with or without entities
+  assert.throws(() => replaceVisibleRange('<w:p><w:r><w:t>😀B</w:t></w:r></w:p>', 1, 2, 'X'), /不可拆分/);
+  assert.throws(() => replaceVisibleRange('<w:p><w:r><w:t>😀B&amp;</w:t></w:r></w:p>', 1, 2, 'X'), /不可拆分/);
+
+  // 10. Multi-anchor (both leading-entity and no-entity / trailing-entity) scales linearly
+  const anchorCount = 4000;
+  const bigOrig = `${'_&amp;'.repeat(anchorCount)}_`;
+  const bigVal = `${'1&'.repeat(anchorCount)}22`;
+  const bigXml = `<w:p><w:r><w:t>${bigOrig}</w:t></w:r>${uRun('_')}</w:p>`;
+  const t0 = performance.now();
+  const bigOut = replaceVisibleRange(bigXml, 0, editableText(bigXml).length, `${bigVal}33`, false);
+  const anchorMs = performance.now() - t0;
+  assert.equal(editableText(bigOut), `${bigVal}33`);
+  assert.ok(anchorMs < 500, `multi-anchor entity replacement took ${anchorMs.toFixed(1)}ms`);
+
+  const plainAnchors = `${'_,'.repeat(anchorCount * 2)}_`;
+  const plainVals = `${'1,'.repeat(anchorCount * 2)}22`;
+  const plainBigXml = `<w:p><w:r><w:t>${plainAnchors}</w:t></w:r>${uRun('_')}</w:p>`;
+  const t1 = performance.now();
+  const plainBigOut = replaceVisibleRange(plainBigXml, 0, editableText(plainBigXml).length, `${plainVals}33`, false);
+  const plainMs = performance.now() - t1;
+  assert.equal(editableText(plainBigOut), `${plainVals}33`);
+  assert.ok(plainMs < 500, `8000 no-entity anchor replacement took ${plainMs.toFixed(1)}ms`);
+});
+
 test('applyTextBatch mark_pending highlights thousands of fragmented runs in linear time', () => {
   const runCount = 4000;
   const fragmentedRuns = Array.from({ length: runCount }, (_, i) => `<w:r><w:t>${String(i % 10)}</w:t></w:r>`).join('');

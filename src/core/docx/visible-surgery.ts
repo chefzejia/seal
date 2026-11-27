@@ -138,7 +138,16 @@ export function wrapVisibleRange(xml: string, start: number, end: number, name: 
   return insert(insert(xml, end, endMarker, 'end'), start, startMarker, 'start');
 }
 
+function rawIndexNoEntities(raw: string, decodedOffset: number): number {
+  if (decodedOffset < 0 || decodedOffset > raw.length) throw new Error('XML 字符偏移越界');
+  if (decodedOffset > 0 && decodedOffset < raw.length && /[\uD800-\uDBFF]/.test(raw[decodedOffset - 1]) && /[\uDC00-\uDFFF]/.test(raw[decodedOffset])) {
+    throw new Error('XML 字符偏移不可拆分');
+  }
+  return decodedOffset;
+}
+
 function rawOffset(raw: string, decodedOffset: number): number {
+  if (!raw.includes('&')) return rawIndexNoEntities(raw, decodedOffset);
   let count = 0;
   for (const match of raw.matchAll(/&(?:#x[0-9a-fA-F]+|#[0-9]+|lt|gt|quot|apos|amp);|[\s\S]/gu)) {
     if (count === decodedOffset) return match.index;
@@ -148,6 +157,30 @@ function rawOffset(raw: string, decodedOffset: number): number {
   if (count !== decodedOffset) throw new Error('XML 字符偏移越界');
   return raw.length;
 }
+
+function hasActiveUnderline(rPr: string): boolean {
+  if (!rPr) return false;
+  const elements = xmlElements(rPr);
+  const root = elements.findIndex(el => el.name === 'w:rPr' && el.parent === null);
+  if (root < 0) return false;
+  return elements.some(el => {
+    if (el.parent !== root || el.name !== 'w:u') return false;
+    const val = /\bw:val\s*=\s*["']([^"']+)["']/.exec(rPr.slice(el.start, el.openEnd))?.[1];
+    return val !== 'none';
+  });
+}
+
+function applyRunHighlight(rPr: string, yellow: boolean | string | null): string {
+  return yellow === true ? injectHighlightYellow(rPr) : yellow === false ? rPr : setRunHighlight(rPr, yellow);
+}
+
+function isBlankOnlyText(text: string): boolean {
+  return text.length > 0 && /^[_\uFF3F\s\u3000\t]+$/.test(text);
+}
+
+type ReplaceSpan =
+  | { kind: 'keep'; origStart: number; origEnd: number }
+  | { kind: 'replace'; origStart: number; origEnd: number; text: string; style: string };
 
 export function replaceVisibleRange(xml: string, start: number, end: number, value: string, yellow: boolean | string | null = false, drawing = '', sealBookmarkIds: ReadonlySet<string> = new Set()): string {
   assertXmlCharacters(value);
@@ -186,13 +219,103 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
     }
   }
   const replacementValue = appendAfter >= 0 ? original : value;
-  const translated = (position: number) => position === original.length ? replacementValue.length : position <= prefix ? position : position >= original.length - suffix ? replacementValue.length - (original.length - position) : prefix;
-  const firstRun = affected[0].run, firstStyle = extractFirstRunPr(xml.slice(firstRun.start, firstRun.end));
-  const insertedStyle = yellow === true
-    ? injectHighlightYellow(firstStyle)
-    : yellow === false
-      ? firstStyle
-      : setRunHighlight(firstStyle, yellow);
+  const runPrByStart = new Map<number, string>();
+  const tokenRunPrs = affected.map(token => {
+    let cached = runPrByStart.get(token.run.start);
+    if (cached === undefined) {
+      cached = extractFirstRunPr(xml.slice(token.run.start, token.run.end));
+      runPrByStart.set(token.run.start, cached);
+    }
+    return cached;
+  });
+  const tokFroms = affected.map(token => Math.max(0, token.start - start));
+  const tokTos = affected.map(token => Math.min(original.length, token.end - start));
+  const firstTokenAtOrAfter = (pos: number): number => {
+    let lo = 0, hi = affected.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (tokTos[mid] <= pos) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const pickSlotStyle = (origStart: number, origEnd: number): string => {
+    if (origStart >= origEnd) {
+      const idx = origStart > 0 ? firstTokenAtOrAfter(origStart - 1) : 0;
+      return tokenRunPrs[Math.min(idx, affected.length - 1)] ?? tokenRunPrs[0];
+    }
+    const firstIdx = firstTokenAtOrAfter(origStart);
+    const defaultStyle = tokenRunPrs[Math.min(firstIdx, affected.length - 1)] ?? tokenRunPrs[0];
+    if (!isBlankOnlyText(original.slice(origStart, origEnd)) || hasActiveUnderline(defaultStyle)) return defaultStyle;
+    for (let k = firstIdx; k < affected.length && tokFroms[k] < origEnd; k++) {
+      const slice = original.slice(Math.max(origStart, tokFroms[k]), Math.min(origEnd, tokTos[k]));
+      if (isBlankOnlyText(slice) && hasActiveUnderline(tokenRunPrs[k])) return tokenRunPrs[k];
+    }
+    return defaultStyle;
+  };
+
+  const rawSpans: ReplaceSpan[] = [];
+  if (prefix > 0) rawSpans.push({ kind: 'keep', origStart: 0, origEnd: prefix });
+  const origMidStart = prefix, origMidEnd = original.length - suffix;
+  const midNew = replacementValue.slice(prefix, replacementValue.length - suffix);
+  if (origMidStart < origMidEnd || midNew.length > 0) {
+    let aligned = false;
+    if (origMidStart < origMidEnd && midNew.length > 0) {
+      const styles = new Set<string>();
+      const anchors: Array<{ origStart: number; origEnd: number; text: string }> = [];
+      let hasBlankPiece = false;
+      for (let k = firstTokenAtOrAfter(origMidStart); k < affected.length && tokFroms[k] < origMidEnd; k++) {
+        styles.add(tokenRunPrs[k]);
+        const segStart = Math.max(origMidStart, tokFroms[k]), segEnd = Math.min(origMidEnd, tokTos[k]);
+        const seg = original.slice(segStart, segEnd);
+        let pos = segStart;
+        for (const part of seg.match(/([_\uFF3F\s\u3000]+|[^_\uFF3F\s\u3000]+)/g) ?? []) {
+          const partEnd = pos + part.length;
+          if (/^[_\uFF3F\s\u3000]+$/.test(part)) hasBlankPiece = true;
+          else if (anchors.length > 0 && anchors[anchors.length - 1].origEnd === pos) {
+            anchors[anchors.length - 1].origEnd = partEnd;
+            anchors[anchors.length - 1].text += part;
+          } else anchors.push({ origStart: pos, origEnd: partEnd, text: part });
+          pos = partEnd;
+        }
+      }
+      if (styles.size > 1 && hasBlankPiece && anchors.length > 0) {
+        const candidate: ReplaceSpan[] = [];
+        let newCursor = 0, origCursor = origMidStart, matchedAll = true;
+        for (const anchor of anchors) {
+          const hit = midNew.indexOf(anchor.text, newCursor);
+          if (hit < 0) { matchedAll = false; break; }
+          if (origCursor < anchor.origStart || newCursor < hit) {
+            candidate.push({ kind: 'replace', origStart: origCursor, origEnd: anchor.origStart, text: midNew.slice(newCursor, hit), style: pickSlotStyle(origCursor, anchor.origStart) });
+          }
+          candidate.push({ kind: 'keep', origStart: anchor.origStart, origEnd: anchor.origEnd });
+          origCursor = anchor.origEnd;
+          newCursor = hit + anchor.text.length;
+        }
+        if (matchedAll) {
+          if (origCursor < origMidEnd || newCursor < midNew.length) {
+            candidate.push({ kind: 'replace', origStart: origCursor, origEnd: origMidEnd, text: midNew.slice(newCursor), style: pickSlotStyle(origCursor, origMidEnd) });
+          }
+          rawSpans.push(...candidate);
+          aligned = true;
+        }
+      }
+    }
+    if (!aligned) {
+      rawSpans.push({ kind: 'replace', origStart: origMidStart, origEnd: origMidEnd, text: midNew, style: pickSlotStyle(origMidStart, origMidEnd) });
+    }
+  }
+  if (suffix > 0) rawSpans.push({ kind: 'keep', origStart: original.length - suffix, origEnd: original.length });
+
+  const spans: ReplaceSpan[] = [];
+  for (const span of rawSpans) {
+    if (span.kind === 'keep' && span.origStart === span.origEnd) continue;
+    if (span.kind === 'replace' && span.origStart === span.origEnd && span.text === '') continue;
+    const prev = spans[spans.length - 1];
+    if (span.kind === 'keep' && prev?.kind === 'keep' && prev.origEnd === span.origStart) prev.origEnd = span.origEnd;
+    else spans.push({ ...span });
+  }
+
   const runGroups = new Map<number, Array<{ token: VisibleTextToken; index: number }>>();
   for (const [index, token] of affected.entries()) {
     const group = runGroups.get(token.run.start) ?? [];
@@ -200,12 +323,14 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
     runGroups.set(token.run.start, group);
   }
   const replacements: Array<{ start: number; end: number; value: string }> = [];
+  let spanIdx = 0;
+  let lastEmittedStyle = tokenRunPrs[affected.length - 1];
   for (const [runStart, entries] of runGroups) {
     const runIndex = runIndexByStart.get(runStart) ?? -1;
     if (runIndex < 0) throw new Error('文字运行节点无效');
     const run = elements[runIndex];
     const runOpen = xml.slice(run.start, run.openEnd);
-    const style = extractFirstRunPr(xml.slice(run.start, run.end));
+    const style = runPrByStart.get(runStart) ?? extractFirstRunPr(xml.slice(run.start, run.end));
     const affectedByStart = new Map(entries.map(entry => [entry.token.element.start, entry]));
     const outputRuns: string[] = [];
     let originalNodes: string[] = [];
@@ -213,6 +338,19 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
       if (originalNodes.length > 0) {
         outputRuns.push(`${runOpen}${style}${originalNodes.join('')}</w:r>`);
         originalNodes = [];
+      }
+    };
+    const emitInserted = (text: string, runStyle: string, extra = '') => {
+      if (!text && !extra) return;
+      flushOriginal();
+      const props = applyRunHighlight(runStyle, yellow);
+      outputRuns.push(`${runOpen}${props}${text ? renderTextRunLines(text) : ''}${extra}</w:r>`);
+      lastEmittedStyle = runStyle;
+    };
+    const flushZeroLengthAt = (pos: number) => {
+      while (spanIdx < spans.length && spans[spanIdx].origStart === pos && spans[spanIdx].origEnd === pos) {
+        const zeroSpan = spans[spanIdx++];
+        if (zeroSpan.kind === 'replace' && zeroSpan.text) emitInserted(zeroSpan.text, zeroSpan.style);
       }
     };
     for (const childIndex of childrenByParent[runIndex]) {
@@ -224,38 +362,108 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
         continue;
       }
       const { token, index } = entry;
-      const fromPosition = Math.max(0, token.start - start), toPosition = Math.min(original.length, token.end - start);
-      const segment = replacementValue.slice(translated(fromPosition), translated(toPosition));
-      const trailingDrawing = index === affected.length - 1 ? drawing : '';
-      const insertText = (segment ? renderTextRunLines(segment) : '') + trailingDrawing;
-      const inserted = segment || trailingDrawing ? `${runOpen}${insertedStyle}${insertText}</w:r>` : '';
-      if (child.name !== 'w:t') {
-        if (inserted) {
-          flushOriginal();
-          outputRuns.push(inserted);
+      const fromPos = tokFroms[index], toPos = tokTos[index];
+      const raw = child.name === 'w:t' ? xml.slice(child.openEnd, child.closeStart) : '';
+      const open = child.name === 'w:t' ? xml.slice(child.start, child.openEnd) : '';
+      const close = child.name === 'w:t' ? xml.slice(child.closeStart, child.end) : '';
+      const from = child.name === 'w:t' ? Math.max(0, start - token.start) : 0;
+      const to = child.name === 'w:t' ? Math.min(token.text.length, end - token.start) : 0;
+      const rawFrom = child.name === 'w:t' ? rawOffset(raw, from) : 0;
+      const rawTo = child.name === 'w:t' ? rawOffset(raw, to) : 0;
+      const beforeRaw = child.name === 'w:t' ? raw.slice(0, rawFrom) : '';
+      const midRaw = child.name === 'w:t' ? raw.slice(rawFrom, rawTo) : '';
+      const afterRaw = child.name === 'w:t' ? raw.slice(rawTo) : '';
+
+      const singleKeepThroughToken =
+        child.name === 'w:t' &&
+        yellow === false &&
+        spanIdx < spans.length &&
+        spans[spanIdx].kind === 'keep' &&
+        spans[spanIdx].origStart <= fromPos &&
+        toPos <= spans[spanIdx].origEnd &&
+        (!afterRaw || !(toPos === original.length && (spanIdx + 1 < spans.length || (index === affected.length - 1 && drawing))));
+
+      if (singleKeepThroughToken) {
+        originalNodes.push(`${open}${raw}${close}`);
+        lastEmittedStyle = style;
+        if (toPos === spans[spanIdx].origEnd) spanIdx++;
+        if (toPos === original.length) {
+          flushZeroLengthAt(original.length);
+          if (index === affected.length - 1 && drawing) {
+            flushOriginal();
+            outputRuns.push(`${runOpen}${applyRunHighlight(lastEmittedStyle, yellow)}${drawing}</w:r>`);
+          }
         }
         continue;
       }
-      const raw = xml.slice(child.openEnd, child.closeStart);
-      const from = Math.max(0, start - token.start), to = Math.min(token.text.length, end - token.start);
-      const before = raw.slice(0, rawOffset(raw, from)), after = raw.slice(rawOffset(raw, to));
-      const open = xml.slice(child.start, child.openEnd), close = xml.slice(child.closeStart, child.end);
-      if (inserted) {
-        if (before) originalNodes.push(`${open}${before}${close}`);
-        flushOriginal();
-        outputRuns.push(inserted);
-        if (after) originalNodes.push(`${open}${after}${close}`);
-      } else if (before || after) {
-        originalNodes.push(`${open}${before}${after}${close}`);
+
+      if (beforeRaw) originalNodes.push(`${open}${beforeRaw}${close}`);
+      const midHasEntity = midRaw.includes('&');
+      let midRawPos = 0, midDecPos = 0;
+      const advanceMidRaw = (targetDec: number): number => {
+        if (!midHasEntity) return rawIndexNoEntities(midRaw, targetDec);
+        while (midDecPos < targetDec && midRawPos < midRaw.length) {
+          if (midRaw[midRawPos] === '&') {
+            const semi = midRaw.indexOf(';', midRawPos + 1);
+            if (semi < 0) throw new Error('XML 实体无效');
+            midDecPos += unescapeXml(midRaw.slice(midRawPos, semi + 1)).length;
+            midRawPos = semi + 1;
+          } else {
+            const cp = midRaw.codePointAt(midRawPos)!;
+            const step = cp > 0xffff ? 2 : 1;
+            midDecPos += step;
+            midRawPos += step;
+          }
+          if (midDecPos > targetDec) throw new Error('XML 字符偏移不可拆分');
+        }
+        if (midDecPos !== targetDec) throw new Error('XML 字符偏移越界');
+        return midRawPos;
+      };
+      let cursor = fromPos;
+      while (cursor < toPos && spanIdx < spans.length) {
+        flushZeroLengthAt(cursor);
+        if (spanIdx >= spans.length) break;
+        const span = spans[spanIdx];
+        if (span.origStart >= toPos) break;
+        const segStart = Math.max(cursor, span.origStart);
+        const segEnd = Math.min(toPos, span.origEnd);
+        if (segStart < segEnd) {
+          if (span.kind === 'keep') {
+            let sliceXml: string;
+            if (child.name === 'w:t') {
+              const sOff = advanceMidRaw(segStart - fromPos);
+              const eOff = advanceMidRaw(segEnd - fromPos);
+              sliceXml = `<w:t xml:space="preserve">${midRaw.slice(sOff, eOff)}</w:t>`;
+            } else {
+              sliceXml = xml.slice(child.start, child.end);
+            }
+            if (yellow === false) originalNodes.push(sliceXml);
+            else {
+              flushOriginal();
+              outputRuns.push(`${runOpen}${applyRunHighlight(style, yellow)}${sliceXml}</w:r>`);
+            }
+            lastEmittedStyle = style;
+          } else if (segStart === span.origStart && span.text) {
+            emitInserted(span.text, span.style);
+          }
+          cursor = segEnd;
+        }
+        if (cursor >= span.origEnd) spanIdx++;
       }
+      if (toPos === original.length) flushZeroLengthAt(original.length);
+      if (index === affected.length - 1 && drawing) {
+        flushOriginal();
+        outputRuns.push(`${runOpen}${applyRunHighlight(lastEmittedStyle, yellow)}${drawing}</w:r>`);
+      }
+      if (afterRaw) originalNodes.push(`${open}${afterRaw}${close}`);
     }
     flushOriginal();
     replacements.push({ start: run.start, end: run.end, value: outputRuns.join('') });
   }
   if (appendAfter >= 0) {
-    const runOpen = xml.slice(firstRun.start, firstRun.openEnd);
+    const runOpen = xml.slice(last.run.start, last.run.openEnd);
     const text = renderTextRunLines(value.slice(original.length));
-    replacements.push({ start: appendAfter, end: appendAfter, value: `${runOpen}${insertedStyle}${text}</w:r>` });
+    replacements.push({ start: appendAfter, end: appendAfter, value: `${runOpen}${applyRunHighlight(tokenRunPrs[affected.length - 1], yellow)}${text}</w:r>` });
   }
   replacements.sort((a, b) => a.start - b.start);
   const parts: string[] = [];
