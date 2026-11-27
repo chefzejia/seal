@@ -274,6 +274,17 @@ test('replaceVisibleRange preserves unchanged date separators, inherits blank sl
   const plainMs = performance.now() - t1;
   assert.equal(editableText(plainBigOut), `${plainVals}33`);
   assert.ok(plainMs < 500, `8000 no-entity anchor replacement took ${plainMs.toFixed(1)}ms`);
+
+  // 11. Covering a _Seal_P_ range from either side never keeps stale Seal yellow on prefix/suffix or replacement
+  const leftCoverXml = '<w:p><w:r><w:rPr><w:highlight w:val="red"/></w:rPr><w:t>甲</w:t></w:r><w:bookmarkStart w:id="9" w:name="_Seal_P_p9"/><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>100</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>';
+  const leftCoverOut = replaceVisibleRange(leftCoverXml, 0, 4, '甲101', false);
+  assert.equal(editableText(leftCoverOut), '甲101');
+  assert.ok(visibleRunProperties(leftCoverOut).every(rPr => /w:val="red"/.test(rPr) && !/yellow/.test(rPr)));
+
+  const rightCoverXml = '<w:p><w:bookmarkStart w:id="9" w:name="_Seal_P_p9"/><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>100</w:t></w:r><w:bookmarkEnd w:id="9"/><w:r><w:t>后</w:t></w:r></w:p>';
+  const rightCoverOut = replaceVisibleRange(rightCoverXml, 0, 4, '101后', false);
+  assert.equal(editableText(rightCoverOut), '101后');
+  assert.ok(visibleRunProperties(rightCoverOut).every(rPr => !/yellow/.test(rPr)));
 });
 
 test('applyTextBatch mark_pending highlights thousands of fragmented runs in linear time', () => {

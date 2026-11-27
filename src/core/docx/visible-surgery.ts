@@ -184,7 +184,8 @@ type ReplaceSpan =
 
 export function replaceVisibleRange(xml: string, start: number, end: number, value: string, yellow: boolean | string | null = false, drawing = '', sealBookmarkIds: ReadonlySet<string> = new Set()): string {
   assertXmlCharacters(value);
-  const affected = visibleTextPositions(xml).filter(token => token.start < end && token.end > start);
+  const allTokens = visibleTextPositions(xml);
+  const affected = allTokens.filter(token => token.start < end && token.end > start);
   if (!affected.length || start < affected[0].start || end > affected[affected.length - 1].end || start >= end) throw new Error('文字范围无效');
   const original = affected.map(token => token.text.slice(Math.max(0, start - token.start), Math.min(token.text.length, end - token.start))).join('');
   let prefix = 0, suffix = 0;
@@ -193,6 +194,36 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
   while (suffix < original.length - prefix && suffix < value.length - prefix && original[original.length - 1 - suffix] === value[value.length - 1 - suffix]) suffix++;
   if (suffix && /[\uDC00-\uDFFF]/.test(original[original.length - suffix]) && /[\uD800-\uDBFF]/.test(original[original.length - suffix - 1] ?? '')) suffix--;
   const elements = xmlElements(xml), childrenByParent = elementChildren(elements), last = affected[affected.length - 1];
+  const coveredPendingLocal: Array<[number, number]> = [];
+  if (xml.includes('_Seal_P_')) {
+    const pendingStartXml = new Map<string, number>();
+    for (const element of elements) {
+      if (element.name !== 'w:bookmarkStart') continue;
+      const open = xml.slice(element.start, element.openEnd);
+      if (!/\bw:name\s*=\s*["']_Seal_P_/.test(open)) continue;
+      const id = /\bw:id\s*=\s*["']([^"']+)["']/.exec(open)?.[1];
+      if (id) pendingStartXml.set(id, element.start);
+    }
+    if (pendingStartXml.size > 0) {
+      for (const element of elements) {
+        if (element.name !== 'w:bookmarkEnd') continue;
+        const id = /\bw:id\s*=\s*["']([^"']+)["']/.exec(xml.slice(element.start, element.openEnd))?.[1];
+        const startXml = id ? pendingStartXml.get(id) : undefined;
+        if (startXml === undefined) continue;
+        const bmStart = visibleOffsetFromTokens(allTokens, startXml);
+        const bmEnd = visibleOffsetFromTokens(allTokens, element.end);
+        if (bmStart < bmEnd && start <= bmStart && bmEnd <= end && (start < bmStart || bmEnd < end)) {
+          coveredPendingLocal.push([bmStart - start, bmEnd - start]);
+        }
+      }
+    }
+  }
+  if (coveredPendingLocal.length > 0) {
+    const minCoveredStart = Math.min(...coveredPendingLocal.map(range => range[0]));
+    const maxCoveredEnd = Math.max(...coveredPendingLocal.map(range => range[1]));
+    prefix = Math.min(prefix, minCoveredStart);
+    suffix = Math.min(suffix, Math.max(0, original.length - maxCoveredEnd));
+  }
   const runIndexByStart = new Map<number, number>();
   for (let index = 0; index < elements.length; index++) {
     if (elements[index].name === 'w:r') runIndexByStart.set(elements[index].start, index);
@@ -239,7 +270,16 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
     }
     return lo;
   };
+  const coveredFallbackStyle = (() => {
+    if (!coveredPendingLocal.length) return '';
+    for (let k = 0; k < affected.length; k++) {
+      const tFrom = tokFroms[k], tTo = tokTos[k];
+      if (!coveredPendingLocal.some(([cs, ce]) => cs <= tFrom && tTo <= ce)) return tokenRunPrs[k];
+    }
+    return setRunHighlight(tokenRunPrs[0], null);
+  })();
   const pickSlotStyle = (origStart: number, origEnd: number): string => {
+    if (coveredPendingLocal.some(([cs, ce]) => origStart < ce && origEnd > cs)) return coveredFallbackStyle;
     if (origStart >= origEnd) {
       const idx = origStart > 0 ? firstTokenAtOrAfter(origStart - 1) : 0;
       return tokenRunPrs[Math.min(idx, affected.length - 1)] ?? tokenRunPrs[0];
@@ -260,7 +300,7 @@ export function replaceVisibleRange(xml: string, start: number, end: number, val
   const midNew = replacementValue.slice(prefix, replacementValue.length - suffix);
   if (origMidStart < origMidEnd || midNew.length > 0) {
     let aligned = false;
-    if (origMidStart < origMidEnd && midNew.length > 0) {
+    if (origMidStart < origMidEnd && midNew.length > 0 && coveredPendingLocal.length === 0) {
       const styles = new Set<string>();
       const anchors: Array<{ origStart: number; origEnd: number; text: string }> = [];
       let hasBlankPiece = false;
