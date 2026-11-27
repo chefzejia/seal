@@ -74,10 +74,20 @@
           "verified-workflow"
         ],
         "sortKeys": {
-          "updated": 1795603769
+          "updated": 1795786060
         }
       },
       "versions": [
+        {
+          "version": "0.1.663",
+          "publishTimestamp": 1795786060,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.5 <0.3.0"
+          }
+        },
         {
           "version": "0.1.604",
           "publishTimestamp": 1795603769,
