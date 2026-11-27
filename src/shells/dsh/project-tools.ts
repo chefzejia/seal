@@ -297,7 +297,7 @@ export function registerProjectTools(ctx: ToolContext, host: HostPort): void {
             items: { type: "json" },
             required: true,
             description:
-              "编辑操作数组：replace(at, find|blank, value)、set_cell(at, value)、check(at, option, checked)、mark_pending(at, find|blank, pending)、insert_rows(at, mode: after|replace, rows)、insert(at, position: before|after, markdown，图片可用 kb:<recordId>/<relPath>)、insert_image(at, image，可用项目内路径或 kb:<recordId>/<relPath>)、insert_toc(at, position: before|after, maxLevel?)、delete(at)、dismiss_hint(at, blank, reason)、dismiss_hints({ targets: [{ at, blanks? }], reason } | { from, to, reason })；可选 pending({ category, note }) 与 thirdPartyHolder。",
+              "编辑操作数组：replace(at, find|blank, value)、set_cell(at, value)、check(at, option, checked)、mark_pending(at, find|blank, pending)、insert_rows(at, mode: after|replace, rows)、insert(at, position: before|after, markdown，图片可用 kb:<recordId>/<relPath>)、insert_image(at, image，可用项目内路径或 kb:<recordId>/<relPath>)、insert_toc(at, position: before|after, maxLevel?)、delete(at, allowDeleteSectionBreak?)、dismiss_hint(at, blank, reason)、dismiss_hints({ targets: [{ at, blanks? }], reason } | { from, to, reason })；可选 pending({ category, note }) 与 thirdPartyHolder。",
           },
         },
         output,

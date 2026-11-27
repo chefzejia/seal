@@ -65,6 +65,14 @@ function operationError(index: number, error: unknown): Error {
   return new Error(`操作 ${index + 1}：${error instanceof Error ? error.message : String(error)}；建议核对该操作的地址、原文或 blank 序号后重新提交整批`);
 }
 
+function paragraphHasSectionBreak(paragraphXml: string): boolean {
+  const elements = xmlElements(paragraphXml);
+  const root = elements.findIndex(el => el.name === 'w:p' && el.parent === null);
+  if (root < 0) return false;
+  const pPr = elements.findIndex(el => el.parent === root && el.name === 'w:pPr');
+  return pPr >= 0 && elements.some(el => el.parent === pPr && el.name === 'w:sectPr');
+}
+
 function highlightRange(xml: string, start: number, end: number): string {
   const elements = xmlElements(xml), childrenByParent = elementChildren(elements);
   const runIndexByStart = new Map<number, number>();
@@ -139,7 +147,7 @@ export type TextBatchEdit = (
   | { op: 'insert_rows'; at: string; mode: 'after' | 'replace'; rows: string[][]; yellow?: boolean; cellHighlights?: ReadonlyArray<string | null | undefined> }
   | { op: 'insert'; at: string; position: 'before' | 'after'; markdown: string; yellow?: boolean; compiledXml?: string; imageSeals?: Array<{ name: string; id: number } | undefined> }
   | { op: 'insert_prepared_image'; at: string; drawing: string; imageLabel?: string; captioned?: boolean; pending?: boolean; widthTwips: number; seal?: { name: string; id: number } }
-  | { op: 'delete'; at: string }
+  | { op: 'delete'; at: string; allowDeleteSectionBreak?: boolean }
   | InsertTocEdit) & { seal?: { name: string; id: number } };
 
 export interface AppliedTocEffect {
@@ -205,6 +213,12 @@ export function applyTextBatchWithMeta(
       let edit: Exclude<TextBatchEdit, { op: 'check' | 'insert_toc' }>;
       if (requested.op === 'delete') {
         if (!['paragraph', 'table', 'row'].includes(element.kind)) throw new Error(`不能删除该位置：${requested.at}`);
+        if (requested.allowDeleteSectionBreak !== undefined && typeof requested.allowDeleteSectionBreak !== 'boolean') {
+          throw new Error('allowDeleteSectionBreak 必须为布尔值');
+        }
+        if (element.kind === 'paragraph' && paragraphHasSectionBreak(element.xml) && !requested.allowDeleteSectionBreak) {
+          throw new Error(`段落 ${requested.at} 承载了分节符（w:sectPr），直接删除会破坏本节版式与页眉页脚；若仅需清空文字请改用 replace，若确认删除整节分节请显式指定 allowDeleteSectionBreak: true`);
+        }
         deletedAddresses.add(requested.at);
         nonTocPlanned.push({ ...element, index, edit: requested, textStart: 0, textEnd: 0 });
         continue;
@@ -379,6 +393,100 @@ export function applyTextBatchWithMeta(
   }).sort((a, b) => b.start - a.start);
   for (let i = 1; i < replacements.length; i++) {
     if (replacements[i].end > replacements[i - 1].start) throw operationError(replacements[i].index, new Error('同一批次中的编辑区域重叠'));
+  }
+  const deletedParagraphs = nonTocPlanned.filter(item => item.edit.op === 'delete' && item.kind === 'paragraph');
+  if (deletedParagraphs.length > 0) {
+    const docElements = xmlElements(documentXml);
+    const docChildren = elementChildren(docElements);
+    const pIndexByStart = new Map<number, number>();
+    for (let i = 0; i < docElements.length; i++) {
+      if (docElements[i].name === 'w:p') pIndexByStart.set(docElements[i].start, i);
+    }
+    const deletedStarts = new Map<number, number>();
+    const affectedContainers = new Set<number>();
+    for (const item of nonTocPlanned) {
+      if (item.edit.op !== 'delete') continue;
+      deletedStarts.set(item.start, item.index);
+      if (item.kind === 'paragraph') {
+        const elIdx = pIndexByStart.get(item.start);
+        const parentIdx = elIdx !== undefined ? docElements[elIdx].parent : null;
+        if (parentIdx !== null) affectedContainers.add(parentIdx);
+      }
+    }
+    const beforeInsertedKinds = new Map<number, Array<'p' | 'tbl'>>();
+    const beforeTocKinds = new Map<number, Array<'p'>>();
+    const afterTocKinds = new Map<number, Array<'p'>>();
+    const afterInsertedKinds = new Map<number, Array<'p' | 'tbl'>>();
+    const appendKinds = <K extends 'p' | 'tbl'>(targetMap: Map<number, K[]>, key: number, kinds: K[]) => {
+      if (!kinds.length) return;
+      const list = targetMap.get(key) ?? [];
+      list.push(...kinds);
+      targetMap.set(key, list);
+    };
+    for (const item of nonTocPlanned) {
+      if (item.edit.op === 'insert') {
+        const kinds = (insertedBlocksByIndex.get(item.index) ?? [])
+          .filter(b => b.kind === 'paragraph' || b.kind === 'table')
+          .map(b => (b.kind === 'paragraph' ? 'p' : 'tbl') as 'p' | 'tbl');
+        appendKinds(item.edit.position === 'before' ? beforeInsertedKinds : afterInsertedKinds, item.start, kinds);
+      } else if (item.edit.op === 'insert_prepared_image' && item.kind !== 'cell') {
+        const kinds = (insertedBlocksByIndex.get(item.index) ?? [])
+          .filter(b => b.kind === 'paragraph' || b.kind === 'table')
+          .map(b => (b.kind === 'paragraph' ? 'p' : 'tbl') as 'p' | 'tbl');
+        appendKinds(afterInsertedKinds, item.start, kinds);
+      }
+    }
+    for (const toc of tocEdits) {
+      const targetStart = resolveAddress(documentXml, toc.edit.at).start;
+      appendKinds(toc.edit.position === 'before' ? beforeTocKinds : afterTocKinds, targetStart, ['p']);
+    }
+    for (const containerIdx of affectedContainers) {
+      const state: { lastBlock: 'none' | 'p' | 'tbl'; sawDeletedP: boolean; mergedDelIdx: number } = {
+        lastBlock: 'none',
+        sawDeletedP: false,
+        mergedDelIdx: 0,
+      };
+      const pushKind = (k: 'p' | 'tbl') => {
+        if (k === 'p') {
+          state.lastBlock = 'p';
+          state.sawDeletedP = false;
+          return;
+        }
+        if (state.lastBlock === 'tbl' && state.sawDeletedP) {
+          throw operationError(state.mergedDelIdx, new Error('删除段落会导致相邻两个表格合并，请至少保留一个分隔段落，或同时删除其中一个表格'));
+        }
+        state.lastBlock = 'tbl';
+        state.sawDeletedP = false;
+      };
+      const walkWrapperContent = (wrapperIdx: number) => {
+        for (const childIdx of docChildren[wrapperIdx]) {
+          const child = docElements[childIdx];
+          if (child.name === 'w:p' || child.name === 'w:tbl') pushKind(child.name === 'w:p' ? 'p' : 'tbl');
+          else if (child.name === 'w:sdt' || child.name === 'w:sdtContent' || child.name === 'w:customXml') walkWrapperContent(childIdx);
+        }
+      };
+      for (const childIdx of docChildren[containerIdx]) {
+        const child = docElements[childIdx];
+        if (child.name === 'w:sdt' || child.name === 'w:customXml') {
+          walkWrapperContent(childIdx);
+          continue;
+        }
+        if (child.name !== 'w:p' && child.name !== 'w:tbl') continue;
+        for (const k of beforeInsertedKinds.get(child.start) ?? []) pushKind(k);
+        for (const k of beforeTocKinds.get(child.start) ?? []) pushKind(k);
+        const delEditIdx = deletedStarts.get(child.start);
+        if (delEditIdx !== undefined) {
+          if (child.name === 'w:p' && state.lastBlock === 'tbl') {
+            state.sawDeletedP = true;
+            state.mergedDelIdx = delEditIdx;
+          }
+        } else {
+          pushKind(child.name === 'w:p' ? 'p' : 'tbl');
+        }
+        for (const k of afterTocKinds.get(child.start) ?? []) pushKind(k);
+        for (const k of afterInsertedKinds.get(child.start) ?? []) pushKind(k);
+      }
+    }
   }
   let output = replacements.reduce((result, item) => result.slice(0, item.start) + item.xml + result.slice(item.end), documentXml);
   if (removed.size) {

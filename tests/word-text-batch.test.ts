@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SaxesParser } from 'saxes';
-import { applyTextBatch, resolveTextTarget } from '../src/core/docx/text-batch.js';
+import { applyTextBatch, resolveTextTarget, type TextBatchEdit } from '../src/core/docx/text-batch.js';
 import { extractPlainText } from '../src/core/docx/xml.js';
 import { editableText } from '../src/core/docx/visible-surgery.js';
+import { readZip, sha256Hex, writeZip } from '../src/core/docx/zip.js';
+import { editBidDraft } from '../src/core/bid/edit.js';
+import type { BidLedger } from '../src/core/bid/project.js';
 
 const xml = `<w:document><w:body><w:p><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>姓名：</w:t></w:r><w:r><w:t>____ 地址：____</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>标签</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr/><w:r><w:drawing/></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>`;
 
@@ -225,4 +228,149 @@ test('copied VML shapes keep shared id and spid references consistent', () => {
   assert.ok(shapes.every(match => match[1] === match[2]));
   assert.deepEqual(shapes.map(match => match[1]), [...output.matchAll(/ShapeID="([^"]+)"/g)].map(match => match[1]));
   assert.deepEqual(shapes.map(match => match[3]), [...output.matchAll(/<v:shapetype id="([^"]+)"/g)].map(match => match[1]));
+});
+
+test('delete rejects table-merging paragraph removal in final batch state while allowing safe restructuring', () => {
+  const mkTbl = (label: string) => `<w:tbl><w:tr><w:tc><w:p><w:r><w:t>${label}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+  const mkP = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const wrap = (body: string) => `<w:document><w:body>${body}<w:sectPr/></w:body></w:document>`;
+
+  // 1. Deleting sole separating paragraph between 2 tables -> rejected
+  const oneSepDoc = wrap(`${mkTbl('表一')}${mkP('分隔段')}${mkTbl('表二')}`);
+  assert.throws(() => applyTextBatch(oneSepDoc, [{ op: 'delete', at: 'p:0' }]), /操作 1.*合并/);
+
+  // 2. Deleting ALL 2 empty separating paragraphs between 2 tables -> rejected (attributed to second delete)
+  const twoSepDoc = wrap(`${mkTbl('表一')}${mkP('')}${mkP('')}${mkTbl('表二')}`);
+  assert.throws(() => applyTextBatch(twoSepDoc, [{ op: 'delete', at: 'p:0' }, { op: 'delete', at: 'p:1' }]), /操作 2.*合并/);
+
+  // 3. Deleting 1 of 2 separating paragraphs -> allowed
+  const keptOne = applyTextBatch(twoSepDoc, [{ op: 'delete', at: 'p:0' }]);
+  assert.equal(editableText(keptOne), '表一表二');
+  assert.equal((keptOne.match(/<w:tbl>/g) ?? []).length, 2);
+
+  // 4. Deleting sole separating paragraph AND either adjacent table in same batch -> allowed
+  const delTrailingTbl = applyTextBatch(oneSepDoc, [{ op: 'delete', at: 'p:0' }, { op: 'delete', at: 't:1' }]);
+  assert.equal(editableText(delTrailingTbl), '表一');
+  const delLeadingTbl = applyTextBatch(oneSepDoc, [{ op: 'delete', at: 't:0' }, { op: 'delete', at: 'p:0' }]);
+  assert.equal(editableText(delLeadingTbl), '表二');
+
+  // 5. Deleting sole separating paragraph AND inserting a separating paragraph -> allowed; inserting a table instead -> rejected
+  const replacedWithPara = applyTextBatch(oneSepDoc, [
+    { op: 'delete', at: 'p:0' },
+    { op: 'insert', at: 't:0', position: 'after', markdown: '新分隔段' },
+  ]);
+  assert.equal(editableText(replacedWithPara), '表一新分隔段表二');
+  assert.throws(
+    () =>
+      applyTextBatch(oneSepDoc, [
+        { op: 'delete', at: 'p:0' },
+        { op: 'insert', at: 't:0', position: 'after', markdown: '| 新列 |\n| --- |\n| 新格 |' },
+      ]),
+    /操作 1.*合并/,
+  );
+
+  // 6. Nested tables inside a cell with sole separating paragraph deleted -> rejected
+  const nestedDoc = wrap(`<w:tbl><w:tr><w:tc>${mkTbl('内表一')}${mkP('内分隔')}${mkTbl('内表二')}</w:tc></w:tr></w:tbl>`);
+  assert.throws(() => applyTextBatch(nestedDoc, [{ op: 'delete', at: 't:0/r:0/c:0/p:0' }]), /操作 1.*合并/);
+
+  // 7. Dirty pre-existing adjacent tables + unrelated paragraph delete -> allowed
+  const dirtyDoc = wrap(`${mkTbl('原相邻表1')}${mkTbl('原相邻表2')}${mkP('无关末尾段')}`);
+  const dirtyCleaned = applyTextBatch(dirtyDoc, [{ op: 'delete', at: 'p:0' }]);
+  assert.equal(editableText(dirtyCleaned), '原相邻表1原相邻表2');
+
+  // 8. insert_toc ordering relative to same-anchor insert(table): A -> TOC -> X -> B leaves X and B merged -> rejected; TOC before B -> allowed
+  const tocDoc = wrap(`${mkTbl('表A')}${mkP('待删分隔')}${mkTbl('表B')}<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>一、章节</w:t></w:r></w:p>`);
+  assert.throws(
+    () =>
+      applyTextBatch(tocDoc, [
+        { op: 'delete', at: 'p:0' },
+        { op: 'insert', at: 't:0', position: 'after', markdown: '| 新 |\n| --- |\n| X |' },
+        { op: 'insert_toc', at: 't:0', position: 'after' },
+      ]),
+    /操作 1.*合并/,
+  );
+  const validTocSep = applyTextBatch(tocDoc, [
+    { op: 'delete', at: 'p:0' },
+    { op: 'insert', at: 't:0', position: 'after', markdown: '| 新 |\n| --- |\n| X |' },
+    { op: 'insert_toc', at: 't:1', position: 'before' },
+  ]);
+  assert.match(editableText(validTocSep), /一、章节/);
+
+  // 9. w:sdt wrapping a kept separating paragraph prevents false table-merge rejection (body & cell); w:sdt wrapping a table without kept paragraph still rejects
+  const sdtBodyKeep = wrap(`${mkTbl('表A')}${mkP('待删')}<w:sdt><w:sdtContent>${mkP('控件分隔')}</w:sdtContent></w:sdt>${mkTbl('表B')}`);
+  assert.equal(editableText(applyTextBatch(sdtBodyKeep, [{ op: 'delete', at: 'p:0' }])), '表A控件分隔表B');
+
+  const sdtCellKeep = wrap(`<w:tbl><w:tr><w:tc>${mkTbl('内表A')}${mkP('待删')}<w:sdt><w:sdtContent>${mkP('内控件分隔')}</w:sdtContent></w:sdt>${mkTbl('内表B')}</w:tc></w:tr></w:tbl>`);
+  assert.equal(editableText(applyTextBatch(sdtCellKeep, [{ op: 'delete', at: 't:0/r:0/c:0/p:0' }])), '内表A内控件分隔内表B');
+
+  const sdtTblMerge = wrap(`${mkTbl('表A')}${mkP('待删')}<w:sdt><w:sdtContent>${mkTbl('控件表')}</w:sdtContent></w:sdt>`);
+  assert.throws(() => applyTextBatch(sdtTblMerge, [{ op: 'delete', at: 'p:0' }]), /操作 1.*合并/);
+});
+
+test('delete protects section-break carrier paragraphs by default while allowing explicit opt-in and ignoring pPrChange', async () => {
+  const doc =
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+    '<w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr></w:pPr><w:r><w:t>分节段</w:t></w:r></w:p>' +
+    '<w:p><w:pPr><w:pPrChange w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:pPr><w:sectPr/></w:pPr></w:pPrChange></w:pPr><w:r><w:t>仅历史修订含分节</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>末段</w:t></w:r></w:p>' +
+    '<w:sectPr/></w:body></w:document>';
+
+  // 1. Deleting active section-break paragraph without flag -> rejected with guidance
+  assert.throws(
+    () => applyTextBatch(doc, [{ op: 'delete', at: 'p:0' }]),
+    /操作 1.*分节符（w:sectPr）.*replace.*allowDeleteSectionBreak: true/,
+  );
+
+  // 2. Deleting same paragraph with allowDeleteSectionBreak: true -> allowed
+  const deletedSect = applyTextBatch(doc, [{ op: 'delete', at: 'p:0', allowDeleteSectionBreak: true }]);
+  assert.equal(editableText(deletedSect), '仅历史修订含分节末段');
+  assert.doesNotMatch(deletedSect, /orient="landscape"/);
+
+  // 3. Historical w:pPrChange/w:sectPr does not count as active section break
+  const deletedRevisionOnly = applyTextBatch(doc, [{ op: 'delete', at: 'p:1' }]);
+  assert.equal(editableText(deletedRevisionOnly), '分节段末段');
+
+  // 4. Non-boolean allowDeleteSectionBreak -> rejected
+  assert.throws(
+    () => applyTextBatch(doc, [{ op: 'delete', at: 'p:2', allowDeleteSectionBreak: 'yes' as unknown as boolean } satisfies TextBatchEdit]),
+    /操作 1.*布尔值/,
+  );
+
+  // 5. editBidDraft forwarding test (allowlist + pass-through + type validation)
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const base = await writeZip(
+    new Map([
+      ['[Content_Types].xml', enc('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+      ['word/document.xml', enc(doc)],
+    ]),
+  );
+  const ledger: BidLedger = {
+    format: 'seal-ledger-1',
+    fills: [],
+    pending: [],
+    dismissals: [],
+    acceptedChanges: [],
+    requirements: [],
+    drafts: { bid: sha256Hex(base) },
+    bases: { bid: sha256Hex(base) },
+  };
+  await assert.rejects(
+    () => editBidDraft({ name: 'bid', old: base, base, ledger, images: new Map(), markdownImages: new Map(), operations: [{ op: 'delete', at: 'p:0' }] }),
+    /分节符（w:sectPr）/,
+  );
+  await assert.rejects(
+    () => editBidDraft({ name: 'bid', old: base, base, ledger, images: new Map(), markdownImages: new Map(), operations: [{ op: 'delete', at: 'p:2', allowDeleteSectionBreak: 1 as unknown as boolean }] }),
+    /布尔值/,
+  );
+  const res = await editBidDraft({
+    name: 'bid',
+    old: base,
+    base,
+    ledger,
+    images: new Map(),
+    markdownImages: new Map(),
+    operations: [{ op: 'delete', at: 'p:0', allowDeleteSectionBreak: true }],
+  });
+  const outXml = new TextDecoder('utf-8', { fatal: true }).decode((await readZip(res.output)).get('word/document.xml')!);
+  assert.equal(editableText(outXml), '仅历史修订含分节末段');
 });

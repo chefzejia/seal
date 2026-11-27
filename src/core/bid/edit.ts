@@ -831,7 +831,7 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
   }
   for (const operation of operations) {
     if (!operation || typeof operation !== 'object' || !['replace', 'set_cell', 'check', 'mark_pending', 'delete', 'insert_rows', 'insert', 'insert_image', 'insert_toc'].includes(operation.op) || typeof operation.at !== 'string') throw new Error('编辑操作无效或尚不支持');
-    const fields: Record<string, string[]> = { replace: ['find', 'blank', 'value'], set_cell: ['value'], check: ['option', 'checked'], mark_pending: ['find', 'blank'], delete: [], insert_rows: ['mode', 'rows'], insert: ['position', 'markdown'], insert_image: ['image'], insert_toc: ['position', 'maxLevel'] };
+    const fields: Record<string, string[]> = { replace: ['find', 'blank', 'value'], set_cell: ['value'], check: ['option', 'checked'], mark_pending: ['find', 'blank'], delete: ['allowDeleteSectionBreak'], insert_rows: ['mode', 'rows'], insert: ['position', 'markdown'], insert_image: ['image'], insert_toc: ['position', 'maxLevel'] };
     if (Object.keys(operation).some(key => !['op', 'at', 'pending', 'thirdPartyHolder', ...fields[operation.op]].includes(key))) throw new Error('编辑操作包含不支持的参数');
     if (operation.op === 'insert_toc') {
       const validatedToc = validateInsertTocEdit(xml, operation);
@@ -1036,7 +1036,11 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
           });
         }
       }
-      pushPrepared(operation, { op: operation.op, at: operation.at });
+      pushPrepared(operation, {
+        op: operation.op,
+        at: operation.at,
+        ...(operation.allowDeleteSectionBreak !== undefined ? { allowDeleteSectionBreak: operation.allowDeleteSectionBreak } : {}),
+      });
       continue;
     }
     const target = operation.op === 'replace' || operation.op === 'mark_pending' ? resolveTextTarget(xml, operation) : operation.op === 'check' ? resolveCheckTarget(xml, operation.at, operation.option) : { start: 0, end: 0, find: '' };
