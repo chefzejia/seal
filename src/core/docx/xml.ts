@@ -198,11 +198,14 @@ const STRIPPED_BODY_PPR_TAGS = new Set([
   'w:keepNext',
   'w:outlineLvl',
   'w:numPr',
+  'w:sectPr',
+  'w:pPrChange',
 ]);
 
 /**
- * Strip non-body structural properties and center/right alignment from an anchor `<w:pPr>`
- * while keeping font/size (`<w:rPr>`), spacing (`<w:spacing>`) and ordinary indentation (`<w:ind>`).
+ * Strip non-body structural properties (including section properties and revision metadata)
+ * and center/right alignment from an anchor `<w:pPr>` while keeping font/size (`<w:rPr>`),
+ * spacing (`<w:spacing>`) and ordinary indentation (`<w:ind>`).
  */
 export function sanitizeInsertedBodyParagraphPr(pPrXml: string): string {
   if (!pPrXml || !pPrXml.trim()) return '';

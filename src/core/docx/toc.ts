@@ -221,7 +221,9 @@ function setParagraphOutlineLevel(paragraphXml: string, level: number): string {
     return result;
   }
   const trailing = elements.find(
-    element => element.parent === pPrIndex && ['w:rPr', 'w:sectPr', 'w:pPrChange'].includes(element.name),
+    element =>
+      element.parent === pPrIndex &&
+      ['w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr', 'w:pPrChange'].includes(element.name),
   );
   const insertAt = trailing ? trailing.start : pPr.closeStart;
   return `${paragraphXml.slice(0, insertAt)}${tag}${paragraphXml.slice(insertAt)}`;
@@ -763,7 +765,7 @@ export function applyInsertToc(
   const tocParagraphsList = entries.map((entry, idx) => {
     const indent = (entry.level - minLevel) * 420;
     const attachSectPr = !preservedSuffixPara && idx === entries.length - 1 ? preservedSectPr : '';
-    const pPr = `<w:pPr><w:jc w:val="left"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="${tabPos}"/></w:tabs><w:ind w:left="${indent}"/><w:spacing w:before="20" w:after="20" w:line="280" w:lineRule="auto"/><w:outlineLvl w:val="9"/>${attachSectPr}</w:pPr>`;
+    const pPr = `<w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="${tabPos}"/></w:tabs><w:spacing w:before="20" w:after="20" w:line="280" w:lineRule="auto"/><w:ind w:left="${indent}"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/>${attachSectPr}</w:pPr>`;
     const outerBegin =
       idx === 0
         ? `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o "1-${validated.maxLevel}" \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>`

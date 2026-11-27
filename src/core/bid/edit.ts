@@ -264,7 +264,7 @@ interface LocatedFact extends InsertedParagraph {
 function locateFactOccurrences(sources: readonly FactSource[], paragraphs: readonly InsertedParagraph[]): LocatedFact[] {
   const counts = new Map<string, number>();
   for (const source of sources) {
-    const value = displayedFactValue(source);
+    const value = displayedFactValue(source).replace(/\r\n/g, '\n');
     if (!value) throw new Error('事实引用解析为空，拒绝写入');
     counts.set(value, (counts.get(value) ?? 0) + 1);
   }
@@ -282,7 +282,7 @@ function locateFactOccurrences(sources: readonly FactSource[], paragraphs: reado
   }
   const used = new Map<string, number>();
   return sources.map(source => {
-    const value = displayedFactValue(source);
+    const value = displayedFactValue(source).replace(/\r\n/g, '\n');
     const matches = occurrences.get(value) ?? [];
     if (matches.length !== counts.get(value)) {
       throw new Error(`事实引用在插入内容中无法唯一定位：${source.reference}；请拆分插入内容或保留每个事实值的唯一上下文`);
@@ -293,9 +293,224 @@ function locateFactOccurrences(sources: readonly FactSource[], paragraphs: reado
   });
 }
 
+interface RangeEditEntry {
+  start: number;
+  end: number;
+  length: number;
+  xmlPos: number;
+  opStart?: number;
+  opEnd?: number;
+  coveredByFact?: boolean;
+  coveredByVerifiedFact?: boolean;
+}
+
+const MAX_RANGE_DIFF_STEPS = 1024;
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function isSubIntervalCovered(
+  start: number,
+  end: number,
+  intervals: ReadonlyArray<readonly [number, number]>,
+): boolean {
+  if (end <= start) return true;
+  const clipped = intervals
+    .map(([s, e]) => [Math.max(start, s), Math.min(end, e)] as const)
+    .filter(([s, e]) => e > s)
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let covered = start;
+  for (const [s, e] of clipped) {
+    if (s > covered) return false;
+    if (e > covered) covered = e;
+    if (covered >= end) return true;
+  }
+  return covered >= end;
+}
+
+function diffTextRangeEdits(
+  localStart: number,
+  oldText: string,
+  newText: string,
+  xmlPos: number,
+  factCoverage?: {
+    allSpans: ReadonlyArray<readonly [number, number]>;
+    verifiedSpans: ReadonlyArray<readonly [number, number]>;
+  },
+): RangeEditEntry[] {
+  if (oldText === newText) return [];
+  const opStart = localStart;
+  const opEnd = localStart + oldText.length;
+  const decorate = (
+    raw: Array<{ start: number; end: number; length: number; newStart: number; newEnd: number }>,
+  ): RangeEditEntry[] => {
+    const wholeFactCovered =
+      !!factCoverage && isSubIntervalCovered(0, newText.length, factCoverage.allSpans);
+    const wholeVerifiedCovered =
+      !!factCoverage && isSubIntervalCovered(0, newText.length, factCoverage.verifiedSpans);
+    return raw.map((item) => {
+      const coveredByFact =
+        !!factCoverage &&
+        (item.newEnd > item.newStart
+          ? isSubIntervalCovered(item.newStart, item.newEnd, factCoverage.allSpans)
+          : wholeFactCovered);
+      const coveredByVerifiedFact =
+        !!factCoverage &&
+        (item.newEnd > item.newStart
+          ? isSubIntervalCovered(item.newStart, item.newEnd, factCoverage.verifiedSpans)
+          : wholeVerifiedCovered);
+      return {
+        start: item.start,
+        end: item.end,
+        length: item.length,
+        xmlPos,
+        opStart,
+        opEnd,
+        coveredByFact,
+        coveredByVerifiedFact,
+      };
+    });
+  };
+  const minLen = Math.min(oldText.length, newText.length);
+  let pre = 0;
+  while (pre < minLen && oldText.charCodeAt(pre) === newText.charCodeAt(pre)) pre++;
+  if (pre > 0 && isHighSurrogate(oldText.charCodeAt(pre - 1))) pre--;
+  let suf = 0;
+  const maxSuf = minLen - pre;
+  while (
+    suf < maxSuf &&
+    oldText.charCodeAt(oldText.length - 1 - suf) === newText.charCodeAt(newText.length - 1 - suf)
+  ) {
+    suf++;
+  }
+  if (suf > 0 && isLowSurrogate(oldText.charCodeAt(oldText.length - suf))) suf--;
+  const midStart = localStart + pre;
+  const oldMid = oldText.slice(pre, oldText.length - suf);
+  const newMid = newText.slice(pre, newText.length - suf);
+  const n = oldMid.length;
+  const m = newMid.length;
+  if (n === 0 && m === 0) return [];
+  if (n === 0 || m === 0) {
+    return decorate([{ start: midStart, end: midStart + n, length: m, newStart: pre, newEnd: pre + m }]);
+  }
+  const maxD = Math.min(n + m, MAX_RANGE_DIFF_STEPS);
+  const offset = maxD;
+  const v = new Int32Array(2 * maxD + 1);
+  v[1 + offset] = 0;
+  const trace: Int32Array[] = [];
+  let foundD = -1;
+  for (let d = 0; d <= maxD; d++) {
+    const snap = new Int32Array(d + 1);
+    for (let k = -d; k <= d; k += 2) {
+      let x: number;
+      if (k === -d || (k !== d && v[k - 1 + offset] < v[k + 1 + offset])) {
+        x = v[k + 1 + offset];
+      } else {
+        x = v[k - 1 + offset] + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && oldMid.charCodeAt(x) === newMid.charCodeAt(y)) {
+        x++;
+        y++;
+      }
+      v[k + offset] = x;
+      snap[(k + d) >> 1] = x;
+      if (x === n && y === m) {
+        foundD = d;
+        break;
+      }
+    }
+    trace.push(snap);
+    if (foundD >= 0) break;
+  }
+  if (foundD < 0) {
+    return decorate([{ start: midStart, end: midStart + n, length: m, newStart: pre, newEnd: pre + m }]);
+  }
+  const rawSteps: Array<{ start: number; end: number; length: number; newStart: number; newEnd: number }> = [];
+  let x = n;
+  let y = m;
+  for (let d = foundD; d >= 1; d--) {
+    const prev = trace[d - 1];
+    const k = x - y;
+    const prevK =
+      k === -d ||
+      (k !== d && prev[(k - 1 + (d - 1)) >> 1] < prev[(k + 1 + (d - 1)) >> 1])
+        ? k + 1
+        : k - 1;
+    const prevX = prev[(prevK + (d - 1)) >> 1];
+    const prevY = prevX - prevK;
+    if (prevK === k + 1) {
+      rawSteps.push({
+        start: midStart + prevX,
+        end: midStart + prevX,
+        length: 1,
+        newStart: pre + prevY,
+        newEnd: pre + prevY + 1,
+      });
+    } else {
+      rawSteps.push({
+        start: midStart + prevX,
+        end: midStart + prevX + 1,
+        length: 0,
+        newStart: pre + prevY,
+        newEnd: pre + prevY,
+      });
+    }
+    x = prevX;
+    y = prevY;
+  }
+  rawSteps.reverse();
+  const hunks: Array<{ start: number; end: number; length: number; newStart: number; newEnd: number }> = [];
+  for (const step of rawSteps) {
+    const last = hunks[hunks.length - 1];
+    if (last && step.start <= last.end && step.newStart <= last.newEnd) {
+      last.end = Math.max(last.end, step.end);
+      last.length += step.length;
+      last.newEnd = Math.max(last.newEnd, step.newEnd);
+    } else {
+      hunks.push({ ...step });
+    }
+  }
+  return decorate(hunks);
+}
+
+function isIntervalCovered(length: number, intervals: ReadonlyArray<readonly [number, number]>): boolean {
+  if (length <= 0) return true;
+  const sorted = [...intervals]
+    .filter(([s, e]) => e > s)
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let covered = 0;
+  for (const [s, e] of sorted) {
+    if (s > covered) return false;
+    if (e > covered) covered = e;
+    if (covered >= length) return true;
+  }
+  return covered >= length;
+}
+
 export async function editBidDraft(input: { name: string; old: Uint8Array; base?: Uint8Array; host?: Pick<HostPort, 'validateImage' | 'extractDocxPageTexts'>; ledger: BidLedger; operations: AgentEdit[]; images: Map<AgentEdit, Uint8Array>; markdownImages: Map<AgentEdit, Uint8Array[]>; facts?: ReadonlyMap<AgentEdit, FactResolution> }): Promise<{ output: Uint8Array; ledger: BidLedger; pending: PendingRecord[]; operations: number; results: Array<{ op: string; status: 'applied'; views: Array<{ address: string; kind: string; text: string }> }> }> {
   const { name, old } = input, ledger = structuredClone(input.ledger), xml = await documentXml(old);
   const ranges = sealRanges(xml), initialPending = new Map(ledger.pending.filter(item => item.draft === name && item.status !== 'removed').map(item => [`_Seal_P_${item.id}`, item]));
+  const initialFillState = new Map(
+    ledger.fills
+      .filter(item => item.draft === name && item.status !== 'removed')
+      .map(item => [
+        item.id,
+        {
+          sealKind: (item.sealKind ?? 'fact') as 'fact' | 'pending',
+          sources: item.sources ? [...item.sources] : [],
+        },
+      ]),
+  );
+  const nonVerifiedFactTouchedFills = new Set<string>();
+  const batchCreatedAggregateFills = new Set<string>();
+  const fillTouchCount = new Map<string, number>();
+  const fullRangeRebindFills = new Map<string, { verifiedFullCover: boolean }>();
   const sourceHighlight = (address: string, fallback = false): string | null => {
     const source = resolveAddress(xml, address), text = editableText(source.xml);
     if (text.length) {
@@ -326,7 +541,55 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
   const insertionBlocks = new Map<WordAgentEdit, ReturnType<typeof parseDocumentBody>['blocks']>();
   const inserted = new Map<WordAgentEdit, ReturnType<typeof pendingReasons>>();
   const highlightEdits = new Map<PendingRecord, Array<{ start: number; end: number; length: number; originals?: Array<string | null> }>>();
+  const rangeEditsByFillId = new Map<string, RangeEditEntry[]>();
+  const batchAddedSpans = new Map<FactSource, { baseStart: number; xmlPos: number; ownEdits?: ReadonlySet<RangeEditEntry>; finalized?: boolean }>();
+  const ensureRangeEditList = (fillId: string): RangeEditEntry[] => {
+    let list = rangeEditsByFillId.get(fillId);
+    if (!list) {
+      list = [];
+      rangeEditsByFillId.set(fillId, list);
+    }
+    return list;
+  };
+  const recordRangeEdit = (fillId: string, entry: RangeEditEntry): RangeEditEntry => {
+    ensureRangeEditList(fillId).push(entry);
+    fillTouchCount.set(fillId, (fillTouchCount.get(fillId) ?? 0) + 1);
+    return entry;
+  };
+  const recordRangeEdits = (fillId: string, entries: readonly RangeEditEntry[]): ReadonlySet<RangeEditEntry> => {
+    const list = ensureRangeEditList(fillId);
+    fillTouchCount.set(fillId, (fillTouchCount.get(fillId) ?? 0) + 1);
+    const set = new Set<RangeEditEntry>();
+    for (const entry of entries) {
+      list.push(entry);
+      set.add(entry);
+    }
+    return set;
+  };
+  const normOffset = (text: string, pos: number): number =>
+    text.slice(0, pos).replace(/\r\n/g, '\n').length;
+  const buildSpannedFact = (
+    fact: FactResolution,
+    baseStart: number,
+    xmlPos = 0,
+    ownEdits?: ReadonlySet<RangeEditEntry>,
+    insideExisting = false,
+  ): FactResolution => {
+    if (!fact.spans.length) return fact;
+    const sources: FactSource[] = fact.spans.map(({ start, end, source }) => {
+      const { cell: _cell, ...rest } = structuredClone(source);
+      const s = baseStart + normOffset(fact.value, start);
+      const e = baseStart + normOffset(fact.value, end);
+      const stamped: FactSource = { ...rest, rangeSpan: { start: s, end: e } };
+      if (insideExisting || ownEdits !== undefined || baseStart > 0) {
+        batchAddedSpans.set(stamped, { baseStart, xmlPos, ownEdits });
+      }
+      return stamped;
+    });
+    return { ...fact, sources };
+  };
   const insertedInto = new Map<WordAgentEdit, { item: PendingRecord; offset: number }>();
+  const insertedIntoFact = new Map<WordAgentEdit, { fillId: string; offset: number }>();
   const imagePending = new Set<WordAgentEdit>();
   const pendingFacts = new Map<string, ReturnType<typeof pendingReasons>>();
   const existingIds = xmlElements(xml).filter(item => item.name === 'w:bookmarkStart' || item.name === 'w:bookmarkEnd').flatMap(item => {
@@ -345,7 +608,16 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
     id: nextBookmark++,
   });
   const addFactFill = (operation: WordAgentEdit, fact: FactResolution, id: string, sealKind: 'fact' | 'pending', resolvedValue: string) => {
-    const cleanSources = fact.sources.map(({ cell: _cell, ...rest }) => structuredClone(rest));
+    const cleanSources = fact.sources.map((src) => {
+      const { cell: _cell, ...rest } = src;
+      const cloned = structuredClone(rest);
+      const meta = batchAddedSpans.get(src);
+      if (meta) {
+        batchAddedSpans.delete(src);
+        batchAddedSpans.set(cloned, meta);
+      }
+      return cloned;
+    });
     const fill = {
       id, draft: name, operation: operation.op,
       reference: cleanSources.map(source => source.reference).join(' + '),
@@ -363,7 +635,21 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
     fill.sealKind = kind;
     if (fact) {
       const sources = fill.sources ?? [];
-      for (const source of fact.sources) if (!sources.some(existing => JSON.stringify(existing) === JSON.stringify(source))) sources.push(structuredClone(source));
+      for (const source of fact.sources) {
+        const { cell: _cell, ...rest } = source;
+        const meta = batchAddedSpans.get(source);
+        // When this batch stamps rangeSpan metadata, always append before post-batch
+        // shift/invalidation so in-place rewrites never get deduplicated onto an old
+        // pre-existing source that is about to be invalidated.
+        if (meta || !sources.some(existing => JSON.stringify(existing) === JSON.stringify(rest))) {
+          const cloned = structuredClone(rest);
+          if (meta) {
+            batchAddedSpans.delete(source);
+            batchAddedSpans.set(cloned, meta);
+          }
+          sources.push(cloned);
+        }
+      }
       fill.sources = sources;
       fill.verified &&= fact.verified;
     }
@@ -618,6 +904,22 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
           addFactFill(operation, fact, imageSeal.name.slice('_Seal_F_'.length), 'fact', visible);
         }
       }
+      if (!mediaFact && visible.length > 0) {
+        const pos = visibleOffsetBefore(xml, element.end);
+        for (const range of ranges) {
+          if (range.startXml < element.end && element.end < range.endXml) {
+            const localPos = pos - range.start;
+            const fillId = range.name.slice('_Seal_P_'.length);
+            nonVerifiedFactTouchedFills.add(fillId);
+            recordRangeEdit(fillId, {
+              start: localPos,
+              end: localPos,
+              length: visible.length,
+              xmlPos: element.end,
+            });
+          }
+        }
+      }
       pushPrepared(operation, { op: 'insert_image', at: operation.at, image, imageLabel: label, captioned: !!caption, pending: isPending, seal: imageSeal });
       continue;
     }
@@ -630,6 +932,25 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
         insertedInto.set(operation, { item, offset: visibleOffsetBefore(xml, position) - range.start });
         for (const reason of reasons) if (!item.reasons.some(existing => JSON.stringify(existing) === JSON.stringify(reason))) item.reasons.push(reason);
         item.status = 'open'; delete item.confirmation; updated.add(item);
+      } else if (range && range.name.startsWith('_Seal_F_')) {
+        insertedIntoFact.set(operation, {
+          fillId: range.name.slice('_Seal_F_'.length),
+          offset: visibleOffsetBefore(xml, position) - range.start,
+        });
+        const factInsertReasons = pendingReasons({
+          context: '',
+          unverifiedFact,
+          declared: operation.pending,
+        });
+        const effectiveReasons = reasons.length ? reasons : factInsertReasons;
+        if (effectiveReasons.length) {
+          const prior = pendingFacts.get(range.name);
+          const combined = [...(prior ?? []), ...effectiveReasons];
+          pendingFacts.set(
+            range.name,
+            combined.filter((reason, idx) => combined.findIndex(entry => JSON.stringify(entry) === JSON.stringify(reason)) === idx),
+          );
+        }
       } else if (reasons.length) inserted.set(operation, reasons);
       const mediaSources = fact?.sources.filter(source => source.media) ?? [];
       const parsed = markdownImageTokens(operation.markdown);
@@ -660,11 +981,64 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
     }
     if (operation.op === 'insert_rows') {
       if (reasons.length) inserted.set(operation, reasons);
+      const rowStart = visibleOffsetBefore(xml, element.start);
+      const rowEnd = visibleOffsetBefore(xml, element.end);
+      const insertedLen = operation.rows.reduce(
+        (sum, row) => sum + row.reduce((rSum, cell) => rSum + cell.replace(/\r\n/g, '\n').length, 0),
+        0,
+      );
+      for (const range of ranges) {
+        if (operation.mode === 'replace') {
+          if (rowEnd <= range.start || rowStart >= range.end) continue;
+          const localStart = Math.max(0, rowStart - range.start);
+          const localEnd = Math.min(range.end - range.start, rowEnd - range.start);
+          if (localEnd > localStart || insertedLen > 0) {
+            const fillId = range.name.slice('_Seal_P_'.length);
+            nonVerifiedFactTouchedFills.add(fillId);
+            recordRangeEdit(fillId, {
+              start: localStart,
+              end: localEnd,
+              length: insertedLen,
+              xmlPos: element.start,
+            });
+          }
+        } else if (range.startXml < element.end && element.end < range.endXml && insertedLen > 0) {
+          const localPos = rowEnd - range.start;
+          const fillId = range.name.slice('_Seal_P_'.length);
+          nonVerifiedFactTouchedFills.add(fillId);
+          recordRangeEdit(fillId, {
+            start: localPos,
+            end: localPos,
+            length: insertedLen,
+            xmlPos: element.end,
+          });
+        }
+      }
       const cellHighlights = parseRowCells(element.xml).map((_cell, colIndex) => pendingCellNativeHighlight(`${operation.at}/c:${colIndex}`, true));
       pushPrepared(operation, { op: operation.op, at: operation.at, mode: operation.mode, rows: operation.rows, yellow: false, cellHighlights });
       continue;
     }
-    if (operation.op === 'delete') { pushPrepared(operation, { op: operation.op, at: operation.at }); continue; }
+    if (operation.op === 'delete') {
+      const delStart = visibleOffsetBefore(xml, element.start);
+      const delEnd = visibleOffsetBefore(xml, element.end);
+      for (const range of ranges) {
+        if (delEnd <= range.start || delStart >= range.end) continue;
+        const localStart = Math.max(0, delStart - range.start);
+        const localEnd = Math.min(range.end - range.start, delEnd - range.start);
+        if (localEnd > localStart) {
+          const fillId = range.name.slice('_Seal_P_'.length);
+          nonVerifiedFactTouchedFills.add(fillId);
+          recordRangeEdit(fillId, {
+            start: localStart,
+            end: localEnd,
+            length: 0,
+            xmlPos: element.start,
+          });
+        }
+      }
+      pushPrepared(operation, { op: operation.op, at: operation.at });
+      continue;
+    }
     const target = operation.op === 'replace' || operation.op === 'mark_pending' ? resolveTextTarget(xml, operation) : operation.op === 'check' ? resolveCheckTarget(xml, operation.at, operation.option) : { start: 0, end: 0, find: '' };
     const offset = visibleOffsetBefore(xml, element.start), start = offset + target.start, end = offset + target.end;
     const related = ranges.map(range => ({ range, relation: rangeRelation(range, start, end) })).filter(item => item.relation !== 'disjoint');
@@ -675,18 +1049,80 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
     const value = operation.op === 'mark_pending' ? target.find : operation.op === 'check' ? operation.checked ? '☑' : '□' : operation.value.replace(/\r\n/g, '\n');
     let seal: { name: string; id: number } | undefined;
     let factFillId: string | undefined, factSealKind: 'fact' | 'pending' | undefined;
+    let factToAdd: FactResolution | undefined = fact;
+    const factCoverage =
+      hasFact && !!fact && fact.value.replace(/\r\n/g, '\n') === value
+        ? {
+            allSpans: fact.spans.map(
+              (span) => [normOffset(fact.value, span.start), normOffset(fact.value, span.end)] as const,
+            ),
+            verifiedSpans: fact.spans
+              .filter((span) => span.source.verified)
+              .map((span) => [normOffset(fact.value, span.start), normOffset(fact.value, span.end)] as const),
+          }
+        : undefined;
     if (existing) {
+      let ownEdits: ReadonlySet<RangeEditEntry> | undefined;
+      let localStart = 0;
       if (operation.op !== 'mark_pending') {
-        const localStart = start - contained!.start, localEnd = end - contained!.start;
+        localStart = start - contained!.start;
+        const localEnd = end - contained!.start;
         const edits = highlightEdits.get(existing) ?? [];
         edits.push({ start: localStart, end: localEnd, length: value.length });
         highlightEdits.set(existing, edits);
+        ownEdits = recordRangeEdits(
+          existing.id,
+          diffTextRangeEdits(localStart, target.find, value, element.start, factCoverage),
+        );
+        if (
+          hasFact &&
+          !!factCoverage &&
+          factCoverage.allSpans.length > 0 &&
+          localStart === 0 &&
+          localEnd === contained!.text.length
+        ) {
+          fullRangeRebindFills.set(existing.id, {
+            verifiedFullCover: isSubIntervalCovered(0, value.length, factCoverage.verifiedSpans),
+          });
+        }
       }
       for (const reason of reasons) if (!existing.reasons.some(item => JSON.stringify(item) === JSON.stringify(reason))) existing.reasons.push(reason);
       existing.status = 'open'; delete existing.confirmation;
       updated.add(existing);
-      if (hasFact && !keepFactFill(existing.id, 'pending', fact)) { factFillId = existing.id; factSealKind = 'pending'; }
+      const spanned = fact ? buildSpannedFact(fact, localStart, element.start, ownEdits, true) : undefined;
+      factToAdd = spanned;
+      if (hasFact && !keepFactFill(existing.id, 'pending', spanned)) {
+        factFillId = existing.id;
+        factSealKind = 'pending';
+        batchCreatedAggregateFills.add(existing.id);
+      }
     } else if (retainedFact) {
+      const retainedId = retainedFact.name.slice('_Seal_F_'.length);
+      let ownEdits: ReadonlySet<RangeEditEntry> | undefined;
+      let localStart = 0;
+      if (operation.op !== 'mark_pending') {
+        localStart = start - contained!.start;
+        const hunks = diffTextRangeEdits(localStart, target.find, value, element.start, factCoverage);
+        ownEdits = recordRangeEdits(retainedId, hunks);
+        const fullyVerifiedReplace =
+          target.find === value ||
+          (hasFact &&
+            verifiedReference &&
+            !!factCoverage &&
+            hunks.every((hunk) => hunk.coveredByVerifiedFact === true));
+        if (!fullyVerifiedReplace) nonVerifiedFactTouchedFills.add(retainedId);
+        if (
+          hasFact &&
+          !!factCoverage &&
+          factCoverage.allSpans.length > 0 &&
+          localStart === 0 &&
+          end - contained!.start === contained!.text.length
+        ) {
+          fullRangeRebindFills.set(retainedId, {
+            verifiedFullCover: isSubIntervalCovered(0, value.length, factCoverage.verifiedSpans),
+          });
+        }
+      }
       const effectiveReasons = reasons.length || verifiedReference
         ? reasons
         : [{ category: '待核对' as const, note: '事实来源未核实', source: 'unverified' as const }];
@@ -695,7 +1131,8 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
         const combined = [...(prior ?? []), ...effectiveReasons];
         pendingFacts.set(retainedFact.name, combined.filter((reason, index) => combined.findIndex(item => JSON.stringify(item) === JSON.stringify(reason)) === index));
       }
-      keepFactFill(retainedFact.name.slice('_Seal_F_'.length), pendingFacts.has(retainedFact.name) ? 'pending' : 'fact', fact);
+      const spanned = fact ? buildSpannedFact(fact, localStart, element.start, ownEdits, true) : undefined;
+      keepFactFill(retainedId, pendingFacts.has(retainedFact.name) ? 'pending' : 'fact', spanned);
     } else if (reasons.length && value) {
       const cellFill = operation.op === 'set_cell' || target.start === target.end;
       const source = cellFill ? cellStyleSource(xml, operation.at) : undefined;
@@ -713,13 +1150,18 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
       }
       const created = newPending(reasons, originalHighlights);
       seal = created.seal;
-      if (hasFact) { factFillId = created.item.id; factSealKind = 'pending'; }
+      if (hasFact) {
+        factFillId = created.item.id;
+        factSealKind = 'pending';
+        factToAdd = fact ? buildSpannedFact(fact, 0) : undefined;
+      }
     } else if (hasFact && value) {
       seal = newFactSeal(operation, input.operations.indexOf(operation));
       factFillId = seal.name.slice('_Seal_F_'.length);
       factSealKind = 'fact';
+      factToAdd = fact ? buildSpannedFact(fact, 0) : undefined;
     }
-    if (hasFact && fact && factFillId && factSealKind) addFactFill(operation, fact, factFillId, factSealKind, value);
+    if (hasFact && factToAdd && factFillId && factSealKind) addFactFill(operation, factToAdd, factFillId, factSealKind, value);
     const yellow = !retainedFact && (reasons.length > 0 || !!existing);
     const cellFill = operation.op === 'set_cell' || (operation.op === 'replace' && target.start === target.end);
     const styleSource = !yellow && cellFill ? cellStyleSource(xml, operation.at) : undefined;
@@ -822,27 +1264,31 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
   let factSequence = 0;
   for (const [index, operation] of input.operations.entries()) {
     if (isDismissOp(operation)) continue;
-    const reasons = inserted.get(operation), containing = insertedInto.get(operation), fact = input.facts?.get(operation);
+    const reasons = inserted.get(operation), containing = insertedInto.get(operation), containingFact = insertedIntoFact.get(operation), fact = input.facts?.get(operation);
     const textFact = fact && fact.sources.some(source => !source.media) ? { ...fact, sources: fact.sources.filter(source => !source.media) } : undefined;
     const needsFactMarking = !!textFact?.sources.length && (operation.op === 'insert' || operation.op === 'insert_rows');
-    if (!reasons && !containing && !needsFactMarking && operation.op !== 'insert_rows') continue;
+    if (!reasons && !containing && !containingFact && !needsFactMarking && operation.op !== 'insert_rows') continue;
     if (operation.op === 'insert_image' && imagePending.has(operation)) continue;
     const find = (nodes: ReturnType<typeof bodyViewNodes>, address: string): ReturnType<typeof bodyViewNodes>[number] | undefined => {
       for (const node of nodes) { if (node.address === address) return node; const child = find(node.children, address); if (child) return child; }
       return undefined;
     };
     const markFactOrPending = (match: LocatedFact) => {
-      const value = displayedFactValue(match.source);
+      const value = displayedFactValue(match.source).replace(/\r\n/g, '\n');
+      const spannedSource: FactSource = {
+        ...structuredClone(match.source),
+        rangeSpan: { start: 0, end: value.length },
+      };
       if (match.source.verified) {
         const seal = newFactSeal(operation, index + factSequence++);
         marking.push({ op: 'mark_fact', at: match.address, span: { start: match.start, end: match.end }, seal });
-        addFactFill(operation, { value, sources: [match.source], spans: [], verified: true }, seal.name.slice('_Seal_F_'.length), 'fact', value);
+        addFactFill(operation, { value, sources: [spannedSource], spans: [], verified: true }, seal.name.slice('_Seal_F_'.length), 'fact', value);
       } else {
         const unverifiedReasons = pendingReasons({ context: '', unverifiedFact: true });
         const originals = visibleRunProperties(match.xml).slice(match.start, match.end).map(highlight);
         const { item, seal } = newPending(unverifiedReasons, originals);
         marking.push({ op: 'mark_pending', at: match.address, span: { start: match.start, end: match.end }, seal });
-        addFactFill(operation, { value, sources: [match.source], spans: [], verified: false }, item.id, 'pending', value);
+        addFactFill(operation, { value, sources: [spannedSource], spans: [], verified: false }, item.id, 'pending', value);
       }
     };
     if (operation.op === 'insert_rows' && !reasons?.length) {
@@ -891,7 +1337,7 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
         for (const source of textFact.sources) {
           if (source.cell) {
             const target = paragraphByCell.get(`${source.cell.row}:${source.cell.col}`);
-            const value = displayedFactValue(source);
+            const value = displayedFactValue(source).replace(/\r\n/g, '\n');
             if (!target || target.text.slice(source.cell.start, source.cell.end) !== value) {
               throw new Error(`事实引用在插入行单元格 (${source.cell.row}, ${source.cell.col}) 中定位失效：${source.reference}`);
             }
@@ -932,7 +1378,9 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
             const originalHighlights = Array(paragraph.text.length).fill(sourceHighlight(`${operation.at}/c:${entry.colIdx}`, true));
             const { item, seal } = newPending(cellReasons, originalHighlights);
             marking.push({ op: 'mark_pending', at: paragraph.address, span: { start: 0, end: paragraph.text.length }, seal });
-            const paraSources = cellFacts.filter(m => m.address === paragraph.address).map(m => m.source);
+            const paraSources = cellFacts
+              .filter(m => m.address === paragraph.address)
+              .map(m => ({ ...structuredClone(m.source), rangeSpan: { start: m.start, end: m.end } }));
             if (paraSources.length) {
               addFactFill(
                 operation,
@@ -951,19 +1399,25 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
     }
     const insertedOriginals: Array<string | null> = [];
     const insertedParagraphs: InsertedParagraph[] = [];
+    const pendingSlices: Array<{ address: string; start: number; end: number; text: string; itemId: string }> = [];
     const addParagraphs = (nodes: ReturnType<typeof bodyViewNodes>) => {
       for (const node of nodes) {
         if (node.kind === 'paragraph') {
           const value = editableText(node.xml);
           if (value) {
-            insertedParagraphs.push({ address: node.address, text: value, xml: node.xml });
+            let rowIdx: number | undefined;
+            let colIdx: number | undefined;
             let originalHighlights = operation.op === 'insert_image' ? Array(value.length).fill(null) : visibleRunProperties(node.xml).map(highlight);
             if (operation.op === 'insert_rows') {
-              const row = results[index].views.find(view => node.address.startsWith(`${view.address}/`));
+              const rowViewIdx = results[index].views.findIndex(view => node.address.startsWith(`${view.address}/`));
+              const row = rowViewIdx >= 0 ? results[index].views[rowViewIdx] : undefined;
               const cell = row && /^\/c:(\d+)(?:\/|$)/.exec(node.address.slice(row.address.length))?.[1];
               if (cell === undefined) throw new Error('无法确定复制行的样式来源');
+              rowIdx = rowViewIdx;
+              colIdx = Number(cell);
               originalHighlights = Array(value.length).fill(sourceHighlight(`${operation.at}/c:${cell}`, true));
             }
+            insertedParagraphs.push({ address: node.address, text: value, xml: node.xml, rowIdx, colIdx });
             if (containing) {
               insertedOriginals.push(...originalHighlights);
               marking.push({ op: 'mark_pending', at: node.address, span: { start: 0, end: value.length } });
@@ -977,8 +1431,7 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
                 if (text) {
                   const { item, seal } = newPending(reasons, originalHighlights.slice(start, end));
                   marking.push({ op: 'mark_pending', at: node.address, span: { start, end }, seal });
-                  const sources = textFact?.sources.filter(source => text.includes(displayedFactValue(source))) ?? [];
-                  if (sources.length) addFactFill(operation, { value: text, sources, spans: [], verified: sources.every(source => source.verified) }, item.id, 'pending', text);
+                  pendingSlices.push({ address: node.address, start, end, text, itemId: item.id });
                 }
                 start = image.end;
               }
@@ -988,14 +1441,154 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
       }
     };
     for (const view of results[index].views) { const node = find(outputBody, view.address); if (!node) throw new Error('无法确定待定内容的新地址'); addParagraphs([node]); }
-    if (!reasons?.length && !containing && textFact?.sources.length) {
+    if (pendingSlices.length && textFact?.sources.length) {
+      const located: LocatedFact[] = [];
+      const unpositioned: FactSource[] = [];
+      const paragraphByCell = new Map<string, InsertedParagraph>();
+      if (operation.op === 'insert_rows') {
+        const countByCell = new Map<string, number>();
+        for (const para of insertedParagraphs) {
+          if (para.rowIdx === undefined || para.colIdx === undefined) continue;
+          const key = `${para.rowIdx}:${para.colIdx}`;
+          countByCell.set(key, (countByCell.get(key) ?? 0) + 1);
+        }
+        for (const para of insertedParagraphs) {
+          if (para.rowIdx === undefined || para.colIdx === undefined) continue;
+          const key = `${para.rowIdx}:${para.colIdx}`;
+          if (countByCell.get(key) === 1) paragraphByCell.set(key, para);
+        }
+      }
+      for (const source of textFact.sources) {
+        if (source.cell && operation.op === 'insert_rows') {
+          const target = paragraphByCell.get(`${source.cell.row}:${source.cell.col}`);
+          const expectedVal = displayedFactValue(source).replace(/\r\n/g, '\n');
+          if (!target || target.text.slice(source.cell.start, source.cell.end) !== expectedVal) {
+            throw new Error(`事实引用在插入行单元格 (${source.cell.row}, ${source.cell.col}) 中定位失效：${source.reference}`);
+          }
+          located.push({ ...target, source, start: source.cell.start, end: source.cell.end });
+        } else {
+          unpositioned.push(source);
+        }
+      }
+      if (unpositioned.length) located.push(...locateFactOccurrences(unpositioned, insertedParagraphs));
+      let matchedTotal = 0;
+      for (const slice of pendingSlices) {
+        const matches = located.filter(
+          (match) =>
+            match.address === slice.address &&
+            match.start >= slice.start &&
+            match.end <= slice.end,
+        );
+        matchedTotal += matches.length;
+        const sources = matches.map((match) => ({
+          ...structuredClone(match.source),
+          rangeSpan: { start: match.start - slice.start, end: match.end - slice.start },
+        }));
+        if (sources.length) {
+          addFactFill(
+            operation,
+            { value: slice.text, sources, spans: [], verified: sources.every((source) => source.verified) },
+            slice.itemId,
+            'pending',
+            slice.text,
+          );
+        }
+      }
+      if (matchedTotal !== located.length) {
+        throw new Error('待定插入内容中的事实引用跨越了图片或边界，无法唯一定位；请拆分段落后再写入');
+      }
+    }
+    if (!reasons?.length && !containing && !containingFact && textFact?.sources.length) {
       for (const match of locateFactOccurrences(textFact.sources, insertedParagraphs)) markFactOrPending(match);
     }
+    if (containingFact) {
+      const promotedKind = pendingFacts.has(`_Seal_F_${containingFact.fillId}`) ? 'pending' : 'fact';
+      const insertedChars = insertedParagraphs.reduce((sum, para) => sum + para.text.length, 0);
+      if (insertedChars > 0) {
+        const anchorEl = resolveAddress(xml, operation.at);
+        const insertXmlPos = operation.op === 'insert' && operation.position === 'before' ? anchorEl.start : anchorEl.end;
+        recordRangeEdit(containingFact.fillId, {
+          start: containingFact.offset,
+          end: containingFact.offset,
+          length: insertedChars,
+          xmlPos: insertXmlPos,
+        });
+        const postRange = sealRanges(outputXml).find((item) => item.name === `_Seal_F_${containingFact.fillId}`);
+        if (textFact?.sources.length && postRange) {
+          const matches = locateFactOccurrences(textFact.sources, insertedParagraphs);
+          if (matches.length) {
+            const sources = matches.map((match) => {
+              const { cell: _cell, ...rest } = structuredClone(match.source);
+              const postPara = resolveAddress(outputXml, match.address);
+              const paraRelStart = visibleOffsetBefore(outputXml, postPara.start) - postRange.start;
+              const stamped: FactSource = {
+                ...rest,
+                rangeSpan: {
+                  start: paraRelStart + match.start,
+                  end: paraRelStart + match.end,
+                },
+              };
+              batchAddedSpans.set(stamped, { baseStart: paraRelStart, xmlPos: insertXmlPos, finalized: true });
+              return stamped;
+            });
+            keepFactFill(containingFact.fillId, promotedKind, { ...textFact, sources });
+          }
+          const fullyVerifiedInsert =
+            textFact.verified &&
+            insertedParagraphs.every((para) =>
+              isIntervalCovered(
+                para.text.length,
+                matches
+                  .filter((m) => m.address === para.address && m.source.verified)
+                  .map((m) => [m.start, m.end] as const),
+              ),
+            );
+          if (!fullyVerifiedInsert) nonVerifiedFactTouchedFills.add(containingFact.fillId);
+        } else {
+          nonVerifiedFactTouchedFills.add(containingFact.fillId);
+          if (promotedKind === 'pending') {
+            keepFactFill(containingFact.fillId, 'pending');
+          }
+        }
+      } else if (promotedKind === 'pending') {
+        keepFactFill(containingFact.fillId, 'pending');
+      }
+    }
     if (containing && insertedOriginals.length) {
-      if (textFact && !keepFactFill(containing.item.id, 'pending', textFact)) {
-        const range = sealRanges(outputXml).find(item => item.name === `_Seal_P_${containing.item.id}`);
-        if (!range) throw new Error('无法确定既有待定范围内的事实引用');
-        addFactFill(operation, textFact, containing.item.id, 'pending', range.text);
+      const anchorEl = resolveAddress(xml, operation.at);
+      const insertXmlPos = operation.op === 'insert' && operation.position === 'before' ? anchorEl.start : anchorEl.end;
+      recordRangeEdit(containing.item.id, {
+        start: containing.offset,
+        end: containing.offset,
+        length: insertedOriginals.length,
+        xmlPos: insertXmlPos,
+      });
+      const postRange = sealRanges(outputXml).find((item) => item.name === `_Seal_P_${containing.item.id}`);
+      let spannedTextFact = textFact;
+      if (textFact?.sources.length && postRange) {
+        const matches = locateFactOccurrences(textFact.sources, insertedParagraphs);
+        if (matches.length) {
+          const sources = matches.map((match) => {
+            const { cell: _cell, ...rest } = structuredClone(match.source);
+            const postPara = resolveAddress(outputXml, match.address);
+            const paraRelStart = visibleOffsetBefore(outputXml, postPara.start) - postRange.start;
+            const stamped: FactSource = {
+              ...rest,
+              rangeSpan: {
+                start: paraRelStart + match.start,
+                end: paraRelStart + match.end,
+              },
+            };
+            batchAddedSpans.set(stamped, { baseStart: paraRelStart, xmlPos: insertXmlPos, finalized: true });
+            return stamped;
+          });
+          spannedTextFact = { ...textFact, sources };
+        }
+      }
+      if (spannedTextFact && !keepFactFill(containing.item.id, 'pending', spannedTextFact)) {
+        if (!postRange) throw new Error('无法确定既有待定范围内的事实引用');
+        addFactFill(operation, spannedTextFact, containing.item.id, 'pending', postRange.text);
+        batchCreatedAggregateFills.add(containing.item.id);
       }
       const edits = highlightEdits.get(containing.item) ?? [];
       edits.push({ start: containing.offset, end: containing.offset, length: insertedOriginals.length, originals: insertedOriginals });
@@ -1005,6 +1598,90 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
   for (const [item, edits] of highlightEdits) for (const edit of edits.sort((a, b) => b.start - a.start)) {
     const inherited = item.originalHighlights[edit.start] ?? null;
     item.originalHighlights.splice(edit.start, edit.end - edit.start, ...(edit.originals ?? Array(edit.length).fill(inherited)));
+  }
+  const supersededSources = new Set<FactSource>();
+  for (const [fillId, edits] of rangeEditsByFillId) {
+    const fill = ledger.fills.find((item) => item.id === fillId && item.draft === name && item.status !== 'removed');
+    if (!fill?.sources?.length) continue;
+    const rebindMeta =
+      fillTouchCount.get(fillId) === 1 ? fullRangeRebindFills.get(fillId) : undefined;
+    const isFullRangeRebind =
+      !!rebindMeta &&
+      (fill.sealKind === 'pending' || rebindMeta.verifiedFullCover) &&
+      !fill.sources.some((src) => !batchAddedSpans.has(src) && src.media);
+    let removedSuperseded = false;
+    for (const src of fill.sources) {
+      if (isFullRangeRebind && !batchAddedSpans.has(src)) {
+        supersededSources.add(src);
+        removedSuperseded = true;
+        continue;
+      }
+      if (!src.rangeSpan || src.rangeSpan.start < 0) continue;
+      const addedMeta = batchAddedSpans.get(src);
+      if (addedMeta) {
+        if (addedMeta.finalized) continue;
+        let deltaBefore = 0;
+        for (const edit of edits) {
+          if (addedMeta.ownEdits?.has(edit)) continue;
+          if (
+            edit.end < addedMeta.baseStart ||
+            (edit.end === addedMeta.baseStart && edit.xmlPos <= addedMeta.xmlPos)
+          ) {
+            deltaBefore += edit.length - (edit.end - edit.start);
+          }
+        }
+        src.rangeSpan = {
+          start: src.rangeSpan.start + deltaBefore,
+          end: src.rangeSpan.end + deltaBefore,
+        };
+      } else {
+        const origS = src.rangeSpan.start;
+        const origE = src.rangeSpan.end;
+        let deltaBefore = 0;
+        const overlappingEdits: RangeEditEntry[] = [];
+        for (const edit of edits) {
+          if (edit.end <= origS) {
+            deltaBefore += edit.length - (edit.end - edit.start);
+          } else if (edit.start < origE) {
+            overlappingEdits.push(edit);
+          }
+        }
+        if (overlappingEdits.length > 0) {
+          const isPendingKind = fill.sealKind === 'pending';
+          const canSupersede =
+            !src.media &&
+            overlappingEdits.every(
+              (edit) =>
+                edit.opStart !== undefined &&
+                edit.opEnd !== undefined &&
+                edit.opStart <= origS &&
+                origE <= edit.opEnd &&
+                (isPendingKind ? edit.coveredByFact === true : edit.coveredByVerifiedFact === true),
+            );
+          if (canSupersede) {
+            supersededSources.add(src);
+            removedSuperseded = true;
+          }
+          src.rangeSpan = { start: -1, end: -1 };
+        } else {
+          src.rangeSpan = { start: origS + deltaBefore, end: origE + deltaBefore };
+        }
+      }
+    }
+    const deduped: FactSource[] = [];
+    const seen = new Set<string>();
+    for (const src of fill.sources) {
+      if (supersededSources.has(src)) continue;
+      const key = JSON.stringify(src);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(src);
+    }
+    fill.sources = deduped;
+    if (removedSuperseded) {
+      fill.verified = fill.sources.length > 0 && fill.sources.every((src) => src.verified);
+      fill.reference = fill.sources.map((src) => src.reference).join(' + ');
+    }
   }
   if (pendingFacts.size) {
     const originals = visibleRunProperties(outputXml).map(highlight);
@@ -1017,6 +1694,54 @@ export async function editBidDraft(input: { name: string; old: Uint8Array; base?
   }
   if (marking.length || pendingFacts.size) { output = await editTextDocument(output, marking, input.host, new Set(pendingFacts.keys())); outputXml = await documentXml(output); }
   const after = sealRanges(outputXml);
+  for (const fillId of rangeEditsByFillId.keys()) {
+    const fill = ledger.fills.find((item) => item.id === fillId && item.draft === name && item.status !== 'removed');
+    if (!fill?.sources?.length) continue;
+    const postKind = fill.sealKind ?? 'fact';
+    const postMarker = postKind === 'pending' ? `_Seal_P_${fillId}` : `_Seal_F_${fillId}`;
+    const postRange = after.find((range) => range.name === postMarker);
+    if (!postRange) continue;
+    const spanMatchesPost = (src: FactSource): boolean =>
+      !src.media &&
+      !!src.rangeSpan &&
+      src.rangeSpan.start >= 0 &&
+      src.rangeSpan.end >= src.rangeSpan.start &&
+      postRange.text.slice(src.rangeSpan.start, src.rangeSpan.end).replace(/\r\n/g, '\n') ===
+        displayedFactValue(src).replace(/\r\n/g, '\n');
+    if (batchCreatedAggregateFills.has(fillId)) {
+      if (postKind === 'pending' && fill.sources.every(spanMatchesPost)) {
+        fill.resolvedValue = postRange.text;
+      }
+      continue;
+    }
+    const initial = initialFillState.get(fillId);
+    const rebindMeta =
+      fillTouchCount.get(fillId) === 1 ? fullRangeRebindFills.get(fillId) : undefined;
+    const isFullRangeRebind =
+      !!rebindMeta &&
+      (postKind === 'pending' || rebindMeta.verifiedFullCover) &&
+      !(initial?.sources.some((src) => src.media) ?? false);
+    if (isFullRangeRebind) {
+      const allowedByGate =
+        postKind === 'pending' || (postKind === 'fact' && !nonVerifiedFactTouchedFills.has(fillId));
+      if (allowedByGate && fill.sources.every(spanMatchesPost)) {
+        fill.resolvedValue = postRange.text;
+      }
+      continue;
+    }
+    if (!initial || !initial.sources.length) continue;
+    const preMarker = initial.sealKind === 'pending' ? `_Seal_P_${fillId}` : `_Seal_F_${fillId}`;
+    const preRange = ranges.find((range) => range.name === preMarker);
+    if (!preRange || preRange.text !== fill.resolvedValue) continue;
+    const remainingInitial = initial.sources.filter((src) => !supersededSources.has(src));
+    if (!remainingInitial.every(spanMatchesPost)) continue;
+    if (!fill.sources.every(spanMatchesPost)) continue;
+    const allowedByGate =
+      postKind === 'pending' || (postKind === 'fact' && !nonVerifiedFactTouchedFills.has(fillId));
+    if (allowedByGate) {
+      fill.resolvedValue = postRange.text;
+    }
+  }
   const beforeNames = new Set(ranges.map(range => range.name));
   const afterNames = new Set(after.map(range => range.name));
   for (const [marker, item] of initialPending) {

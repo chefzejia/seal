@@ -14,6 +14,7 @@ interface Unit {
   children: Unit[];
   objects: ProtectedObject[];
   properties: string[];
+  structuralProperties: string[];
 }
 type Pair = [number | undefined, number | undefined];
 const mediaNames = new Set(['w:drawing', 'w:pict', 'w:object']);
@@ -25,7 +26,7 @@ function attributes(xml: string, element: XmlElement): Map<string, string> {
 }
 
 /** This reader uses XML structure only; it does not reuse the editing engine's text projection. */
-function content(xml: string, bookmarkNames: ReadonlyMap<string, string>, refs?: ReadonlyMap<string, string>): { text: string; objects: ProtectedObject[]; properties: string[] } {
+function content(xml: string, bookmarkNames: ReadonlyMap<string, string>, refs?: ReadonlyMap<string, string>): { text: string; objects: ProtectedObject[]; properties: string[]; structuralProperties: string[] } {
   const elements = xmlElements(xml), hiddenRuns = new Set<number>();
   for (const element of elements) {
     if (element.name !== 'w:vanish' || ['0', 'false', 'off'].includes(attributes(xml, element).get('w:val') ?? '')) continue;
@@ -74,8 +75,9 @@ function content(xml: string, bookmarkNames: ReadonlyMap<string, string>, refs?:
     }
     objects.push({ identity, start: tokens.filter(token => token.end <= element.start).reduce((sum, token) => sum + token.text.length, 0), end: tokens.filter(token => token.start < element.end).reduce((sum, token) => sum + token.text.length, 0) });
   }
-  const properties = elements.filter(element => ['w:pPr', 'w:rPr', 'w:tcPr', 'w:trPr', 'w:tblPr'].includes(element.name)).map(element => xml.slice(element.start, element.end));
-  return { text: tokens.map(token => token.text).join(''), objects, properties };
+  const properties = elements.filter(element => ['w:pPr', 'w:rPr', 'w:tcPr', 'w:trPr', 'w:tblPr', 'w:tblGrid', 'w:tblPrEx'].includes(element.name)).map(element => xml.slice(element.start, element.end));
+  const structuralProperties = elements.filter(element => element.parent === 0 && ['w:pPr', 'w:tcPr', 'w:trPr', 'w:tblPr', 'w:tblGrid', 'w:tblPrEx'].includes(element.name)).map(element => xml.slice(element.start, element.end));
+  return { text: tokens.map(token => token.text).join(''), objects, properties, structuralProperties };
 }
 
 function units(xml: string, refs?: ReadonlyMap<string, string>): Unit[] {
@@ -115,7 +117,7 @@ function units(xml: string, refs?: ReadonlyMap<string, string>): Unit[] {
       for (const child of addressedChildren) { ownXml += xml.slice(cursor, elements[child].start); cursor = elements[child].end; }
       ownXml += xml.slice(cursor, element.end);
       const own = content(ownXml, bookmarks, refs);
-      return { address, kind, objectText: own.text, text: children.length ? [...(own.text ? [own.text] : []), ...children.map(child => child.text)].join('\n') : own.text, shape: `${kind}[${children.map(child => child.shape).join(',')}]`, children, objects: own.objects, properties: own.properties };
+      return { address, kind, objectText: own.text, text: children.length ? [...(own.text ? [own.text] : []), ...children.map(child => child.text)].join('\n') : own.text, shape: `${kind}[${children.map(child => child.shape).join(',')}]`, children, objects: own.objects, properties: own.properties, structuralProperties: own.structuralProperties };
     });
   };
   return buildChildren(body, '', ['w:p', 'w:tbl']);
@@ -297,7 +299,11 @@ export function compareBodyXml(beforeXml: string, afterXml: string, relationship
           compare(a.children, b.children);
           if (a.objectText !== b.objectText) differences.push(difference(filled(a.objectText, b.objectText) ? 'filled' : 'modified', a.address, a.objectText, b.objectText, undefined, b.address));
         } else if (a.text !== b.text) differences.push(difference(filled(a.text, b.text) ? 'filled' : 'modified', a.address, a.text, b.text, undefined, b.address));
-        if (a.text === b.text && JSON.stringify(a.properties) !== JSON.stringify(b.properties)) differences.push(difference('formatChanged', a.address, a.text, b.text, [a.properties, b.properties], b.address));
+        const beforeProps = a.text === b.text ? a.properties : a.structuralProperties;
+        const afterProps = a.text === b.text ? b.properties : b.structuralProperties;
+        if (JSON.stringify(beforeProps) !== JSON.stringify(afterProps)) {
+          differences.push(difference('formatChanged', a.address, a.text, b.text, [beforeProps, afterProps], b.address));
+        }
       }
     }
   };

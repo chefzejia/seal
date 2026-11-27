@@ -881,7 +881,7 @@ test("M42 C17 deterministic checks: missing/corrupt/unconfirmed/missing_volume/m
         at: "p:2",
         position: "after",
         markdown:
-          "### 1. 营业执照扫描件\n\n### 2. 补充证明PDF\n\n### 3. 待补材料占位节\n\n![page1](materials/outline/page-1.png)",
+          "### 1. 营业执照扫描件\n\n### 2. 补充证明PDF\n\n![page1](materials/outline/page-1.png)\n\n### 3. 待补材料占位节",
       },
     ]),
   ]);
@@ -910,7 +910,7 @@ test("M42 C17 deterministic checks: missing/corrupt/unconfirmed/missing_volume/m
     `Unexpected missing_section: ${JSON.stringify(c17AfterPartial)}`,
   );
 
-  // Mount KB image + page-2.png (read blocks first to locate exact anchor)
+  // Mount KB image under "1. 营业执照扫描件" + page-2.png under "2. 补充证明PDF" (right after page-1.png)
   const beforeMount = (await runProject(host, [
     "read",
     "--project",
@@ -919,8 +919,8 @@ test("M42 C17 deterministic checks: missing/corrupt/unconfirmed/missing_volume/m
     "商务标",
     "--mode",
     "blocks",
-  ])) as { items: Array<{ address: string | null }> };
-  const lastAddr = beforeMount.items.filter((i) => i.address).at(-1)!.address!;
+  ])) as { items: Array<{ address: string | null; text: string }> };
+  const page1Addr = beforeMount.items.find((i) => i.address && i.text.includes("[图片]"))!.address!;
 
   await runProject(host, [
     "edit",
@@ -938,7 +938,7 @@ test("M42 C17 deterministic checks: missing/corrupt/unconfirmed/missing_volume/m
       },
       {
         op: "insert_image",
-        at: lastAddr,
+        at: page1Addr,
         image: "materials/outline/page-2.png",
       },
     ]),

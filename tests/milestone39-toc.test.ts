@@ -161,14 +161,21 @@ test('M39 toc: multi-level headings, relative indent, right dot tab, _TocSeal_ b
   assert.ok(xml.includes('<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>'));
   assert.ok(xml.includes('<w:jc w:val="left"/>'));
 
-  // TOC entries have neutral font (宋体/Times New Roman, sz=24) and NEVER inherit yellow highlight or sz=44 or center!
-  const tocParagraphs = xml.match(/<w:p><w:pPr><w:jc w:val="left"\/>[\s\S]*?<\/w:p>/g) ?? [];
+  // TOC entries follow OOXML CT_PPrBase sequence order (tabs -> spacing -> ind -> jc -> outlineLvl)
+  // and have neutral font (宋体/Times New Roman, sz=24), NEVER inheriting yellow highlight or sz=44 or center!
+  const tocParagraphs = xml.match(/<w:p><w:pPr><w:tabs>[\s\S]*?<\/w:p>/g) ?? [];
   assert.equal(tocParagraphs.length, 4);
   for (const tp of tocParagraphs) {
     assert.ok(!tp.includes('yellow'), 'TOC entry must not inherit yellow highlight');
     assert.ok(!tp.includes('w:val="center"'), 'TOC entry must not inherit center alignment');
     assert.ok(!tp.includes('w:val="44"'), 'TOC entry must not inherit title font size');
     assert.ok(tp.includes('<w:outlineLvl w:val="9"/>'));
+    const pPrXml = tp.match(/<w:pPr>[\s\S]*?<\/w:pPr>/)?.[0] ?? '';
+    const order = ['<w:tabs>', '<w:spacing ', '<w:ind ', '<w:jc ', '<w:outlineLvl '].map(tag => pPrXml.indexOf(tag));
+    assert.ok(order.every(pos => pos >= 0), `missing expected CT_PPrBase tags in ${pPrXml}`);
+    for (let i = 1; i < order.length; i++) {
+      assert.ok(order[i - 1] < order[i], `CT_PPrBase tag order violated in ${pPrXml}`);
+    }
     // Must not leave fake "1" page cache when host.extractDocxPageTexts is absent.
     assert.ok(!/<w:t>1<\/w:t>/.test(tp), 'TOC entry must not leave fake page "1"');
   }
@@ -894,7 +901,7 @@ test('M39 seal loop: same-batch insert(pending) + insert_toc prevents bookmark I
     assert.ok(res2.results[1].views[0].text.includes('第一章 投标函'));
 
     const xml2 = await xmlOf(res2.output);
-    const tocPara = xml2.match(/<w:p><w:pPr><w:jc w:val="left"\/>[\s\S]*?<\/w:p>/)?.[0] ?? '';
+    const tocPara = xml2.match(/<w:p><w:pPr><w:tabs>[\s\S]*?<\/w:p>/)?.[0] ?? '';
     assert.ok(!tocPara.includes('yellow'), 'TOC entry must stay white when sibling insert is pending');
     assert.ok(!tocPara.includes('_Seal_P_'), 'TOC entry must not get pending bookmark');
 

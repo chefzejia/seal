@@ -1,6 +1,7 @@
 import { validatePackageStructure, resolveRelationshipTarget } from "../docx/package-structure.js";
 import { sealRanges, type SealRange } from "../docx/seal-ranges.js";
-import { xmlAttributes } from "../docx/outline.js";
+import { visibleTextPositions } from "../docx/visible-surgery.js";
+import { styleChain, wordStyles, xmlAttributes, type WordStyle, type WordStyles } from "../docx/outline.js";
 import { elementChildren, unescapeXml, xmlElements } from "../docx/xml.js";
 import { sha256Hex } from "../docx/zip.js";
 import {
@@ -8,6 +9,7 @@ import {
   signAuthorization,
   type SignedAuthorization,
 } from "./authorization.js";
+import { displayedFactValue, type FactSource } from "./facts.js";
 import type { BidLedger, WorkflowMode } from "./project.js";
 
 export type OutlineNodeKind = "template" | "authored" | "attachment";
@@ -1541,6 +1543,10 @@ function stripNumberPrefix(normalized: string): string {
   return current;
 }
 
+const LABEL_PREFIX_PATTERN =
+  /^(?:附件|格式|附表|表)(?:[0-9a-z一二三四五六七八九十]+(?:\.[0-9]+)*[:、.\-]?|[:、.\-])/u;
+const HEADING_STYLE_LEVEL_PATTERN = /^(?:heading|标题)\s*([1-9])$/i;
+
 function headingVariants(rawHeading: string): string[] {
   const full = normalizeHeadingRaw(rawHeading);
   if (!full) return [];
@@ -1548,20 +1554,1288 @@ function headingVariants(rawHeading: string): string[] {
   return stripped && stripped !== full ? [full, stripped] : [full];
 }
 
+interface VisibleBodyParagraphInfo {
+  text: string;
+  start: number;
+  end: number;
+  headingLevel: number;
+  inTable: boolean;
+}
+
+function styleResolvedHeadingLevel(
+  chain: readonly WordStyle[],
+  defaults?: number,
+): number {
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const level = chain[i].outlineLevel;
+    if (level !== undefined) return level === 9 ? 0 : level + 1;
+  }
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const match = HEADING_STYLE_LEVEL_PATTERN.exec(chain[i].name ?? chain[i].id);
+    if (match) return Number(match[1]);
+  }
+  return defaults !== undefined && defaults !== 9 ? defaults + 1 : 0;
+}
+
+function paragraphHeadingLevel(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  paraIdx: number,
+  styles: WordStyles | null,
+  excludedSpans: readonly XmlSpan[] = [],
+): number {
+  const pPrIdx = activeChildrenOf(elements, children, paraIdx, excludedSpans).find(
+    (childIdx) => elements[childIdx].name === "w:pPr",
+  );
+  let styleId: string | undefined;
+  if (pPrIdx !== undefined) {
+    const pPrChildren = activeChildrenOf(elements, children, pPrIdx, excludedSpans);
+    const explicitIdx = pPrChildren.find(
+      (childIdx) => elements[childIdx].name === "w:outlineLvl",
+    );
+    if (explicitIdx !== undefined) {
+      const val = xmlAttributes(docXml, elements[explicitIdx]).get("w:val");
+      return val !== undefined && /^[0-8]$/.test(val) ? Number(val) + 1 : 0;
+    }
+    const styleIdx = pPrChildren.find(
+      (childIdx) => elements[childIdx].name === "w:pStyle",
+    );
+    if (styleIdx !== undefined) {
+      styleId = xmlAttributes(docXml, elements[styleIdx]).get("w:val");
+    }
+  }
+  if (!styles) {
+    const match = styleId ? HEADING_STYLE_LEVEL_PATTERN.exec(styleId) : null;
+    return match ? Number(match[1]) : 0;
+  }
+  const effectiveStyleId = styleId ?? styles.defaultParagraph;
+  const level = styleResolvedHeadingLevel(
+    styleChain(styles, effectiveStyleId, "paragraph"),
+    styles.defaultOutline,
+  );
+  if (level > 0) return level;
+  if (effectiveStyleId && !styles.styles.has(effectiveStyleId)) {
+    const match = HEADING_STYLE_LEVEL_PATTERN.exec(effectiveStyleId);
+    if (match) return Number(match[1]);
+  }
+  return 0;
+}
+
+function headingMatchesParagraph(
+  para: VisibleBodyParagraphInfo,
+  variants: readonly string[],
+): boolean {
+  if (variants.length === 0) return false;
+  const pNorm = normalizeHeadingRaw(para.text);
+  if (!pNorm) return false;
+  const pStripped = stripNumberPrefix(pNorm);
+  const pLabelStripped = pStripped.replace(LABEL_PREFIX_PATTERN, "");
+
+  for (const variant of variants) {
+    if (!variant) continue;
+    if (pNorm === variant || pStripped === variant) {
+      return true;
+    }
+    // Allow deterministic numbering-like form prefixes (e.g. "格式一：投标函" matching "投标函")
+    // ONLY when the expected variant itself does not carry an explicit form/attachment label.
+    if (
+      pLabelStripped.length > 0 &&
+      !LABEL_PREFIX_PATTERN.test(variant) &&
+      pLabelStripped === variant
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function countMissingExpectedHashes(
+  expectedHashes: readonly string[],
+  presentHashes: readonly string[],
+): number {
+  const available = new Map<string, number>();
+  for (const hash of presentHashes) {
+    available.set(hash, (available.get(hash) ?? 0) + 1);
+  }
+  let missing = 0;
+  for (const hash of expectedHashes) {
+    const count = available.get(hash) ?? 0;
+    if (count > 0) {
+      available.set(hash, count - 1);
+    } else {
+      missing++;
+    }
+  }
+  return missing;
+}
+
+interface XmlSpan {
+  start: number;
+  end: number;
+}
+
+interface AlternateContentProfile {
+  excludedSpans: readonly XmlSpan[];
+  projectedStylesXml: string;
+}
+
+function isSpanExcluded(
+  start: number,
+  end: number,
+  excludedSpans: readonly XmlSpan[],
+): boolean {
+  for (const span of excludedSpans) {
+    if (start >= span.start && end <= span.end) return true;
+    if (span.start > start) break;
+  }
+  return false;
+}
+
+function isOffsetExcluded(
+  pos: number,
+  excludedSpans: readonly XmlSpan[],
+): boolean {
+  for (const span of excludedSpans) {
+    if (pos >= span.start && pos < span.end) return true;
+    if (span.start > pos) break;
+  }
+  return false;
+}
+
+function mergeSortedSpans(spans: XmlSpan[]): XmlSpan[] {
+  if (spans.length <= 1) return spans;
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: XmlSpan[] = [spans[0]];
+  for (let i = 1; i < spans.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = spans[i];
+    if (cur.start <= prev.end) {
+      if (cur.end > prev.end) prev.end = cur.end;
+    } else {
+      merged.push(cur);
+    }
+  }
+  return merged;
+}
+
+const MC_NAMESPACE_URI =
+  "http://schemas.openxmlformats.org/markup-compatibility/2006";
+const MAX_ALTERNATE_CONTENT_URI_CLASSES = 8;
+const MAX_ALTERNATE_CONTENT_PROFILES = 64;
+
+type AlternateContentProfilesResult =
+  | { kind: "ok"; profiles: AlternateContentProfile[] }
+  | { kind: "error"; reason: string };
+
+interface ParsedAltNode {
+  altIdx: number;
+  choices: Array<{ idx: number; requiredUris: string[] }>;
+  fallbackIdx: number | null;
+  allBranchIndices: number[];
+}
+
+type ParsedAltPartResult =
+  | {
+      kind: "ok";
+      elements: ReturnType<typeof xmlElements>;
+      altNodes: ParsedAltNode[];
+    }
+  | { kind: "error"; reason: string };
+
+function parseAlternateContentPart(xml: string): ParsedAltPartResult {
+  if (!xml) return { kind: "ok", elements: [], altNodes: [] };
+  const elements = xmlElements(xml);
+  const children = elementChildren(elements);
+  const nsByElement = new Array<ReadonlyMap<string, string>>(elements.length);
+  const rootNs = new Map<string, string>([
+    ["xml", "http://www.w3.org/XML/1998/namespace"],
+  ]);
+  const buildScopes = (idx: number, parentNs: ReadonlyMap<string, string>): void => {
+    const el = elements[idx];
+    const attrs = xmlAttributes(xml, el);
+    let ns: Map<string, string> | null = null;
+    for (const [k, v] of attrs) {
+      if (k === "xmlns") {
+        if (!ns) ns = new Map(parentNs);
+        if (v) ns.set("", v);
+        else ns.delete("");
+      } else if (k.startsWith("xmlns:")) {
+        if (!ns) ns = new Map(parentNs);
+        const prefix = k.slice(6);
+        if (v) ns.set(prefix, v);
+        else ns.delete(prefix);
+      }
+    }
+    const effective = ns ?? parentNs;
+    nsByElement[idx] = effective;
+    for (const childIdx of children[idx]) {
+      buildScopes(childIdx, effective);
+    }
+  };
+  for (let i = 0; i < elements.length; i++) {
+    if (elements[i].parent === null) {
+      buildScopes(i, rootNs);
+    }
+  }
+
+  const isMcElement = (idx: number, localName: string): boolean => {
+    const name = elements[idx].name;
+    const colon = name.indexOf(":");
+    const prefix = colon < 0 ? "" : name.slice(0, colon);
+    const local = colon < 0 ? name : name.slice(colon + 1);
+    if (local !== localName) return false;
+    const uri = nsByElement[idx]?.get(prefix);
+    return uri === MC_NAMESPACE_URI || (uri === undefined && prefix === "mc");
+  };
+
+  const altNodes: ParsedAltNode[] = [];
+  for (let i = 0; i < elements.length; i++) {
+    if (!isMcElement(i, "AlternateContent")) continue;
+    const choices: Array<{ idx: number; requiredUris: string[] }> = [];
+    let fallbackIdx: number | null = null;
+    const allBranchIndices: number[] = [];
+    for (const childIdx of children[i]) {
+      if (isMcElement(childIdx, "Choice")) {
+        const reqAttr = xmlAttributes(xml, elements[childIdx]).get("Requires");
+        const prefixes = (reqAttr ?? "").trim().split(/\s+/).filter(Boolean);
+        if (prefixes.length === 0) {
+          return {
+            kind: "error",
+            reason: "文档包含缺少有效 Requires 属性的 mc:Choice 分支，无法确定兼容渲染行为",
+          };
+        }
+        const scope = nsByElement[childIdx];
+        const resolvedSet = new Set<string>();
+        for (const prefix of prefixes) {
+          const uri = scope?.get(prefix);
+          if (!uri) {
+            return {
+              kind: "error",
+              reason: `mc:Choice 的 Requires 引用了未声明的命名空间前缀「${prefix}」，无法确定兼容渲染行为`,
+            };
+          }
+          resolvedSet.add(uri);
+        }
+        choices.push({ idx: childIdx, requiredUris: [...resolvedSet] });
+        allBranchIndices.push(childIdx);
+      } else if (isMcElement(childIdx, "Fallback")) {
+        if (fallbackIdx === null) fallbackIdx = childIdx;
+        allBranchIndices.push(childIdx);
+      }
+    }
+    if (allBranchIndices.length > 0) {
+      altNodes.push({ altIdx: i, choices, fallbackIdx, allBranchIndices });
+    }
+  }
+  return { kind: "ok", elements, altNodes };
+}
+
+function projectXmlByAlternateChoices(
+  xml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  sortedAltIndices: readonly number[],
+  chosenBranchByAltIdx: ReadonlyMap<number, number | null>,
+): string {
+  if (sortedAltIndices.length === 0) return xml;
+  const renderRange = (rangeStart: number, rangeEnd: number): string => {
+    if (rangeEnd <= rangeStart) return "";
+    const out: string[] = [];
+    let cursor = rangeStart;
+    for (const altIdx of sortedAltIndices) {
+      const altEl = elements[altIdx];
+      if (altEl.end <= rangeStart) continue;
+      if (altEl.start >= rangeEnd) break;
+      if (altEl.start < cursor) continue;
+      out.push(xml.slice(cursor, altEl.start));
+      const chosenIdx = chosenBranchByAltIdx.get(altIdx) ?? null;
+      if (chosenIdx !== null) {
+        const chosenEl = elements[chosenIdx];
+        out.push(renderRange(chosenEl.openEnd, chosenEl.closeStart));
+      }
+      cursor = altEl.end;
+    }
+    out.push(xml.slice(cursor, rangeEnd));
+    return out.join("");
+  };
+  return renderRange(0, xml.length);
+}
+
 /**
- * Extract visible body and table-cell paragraph texts from word/document.xml,
- * excluding TOC field caches (begin..end whose instruction matches /\bTOC\b/i, and w:fldSimple),
- * tracked deletions/moves (w:del, w:moveFrom, *PrChange), textboxes (w:txbxContent),
- * and runs with active w:vanish or w:webHidden.
+ * Resolve ALL reachable OOXML Markup Compatibility (ECMA-376 Part 3 §10.2.1) consumer profiles
+ * jointly across word/document.xml and word/styles.xml.
+ * - Resolves every Choice/@Requires prefix against the Choice element's in-scope XML namespace URI.
+ * - Shares a single consumer capability mask across both parts so incompatible cross-part branch
+ *   combinations are never synthesized while every reachable consumer view is verified.
+ * - Fails closed on missing/unbound Requires prefixes or when reachable profile combinations exceed
+ *   the deterministic verification budget (never silently samples or truncates).
  */
-export function visibleBodyNonTocParagraphs(docXml: string): string[] {
+function alternateContentProfiles(
+  docXml: string,
+  stylesXml = "",
+): AlternateContentProfilesResult {
+  const docPart = parseAlternateContentPart(docXml);
+  if (docPart.kind === "error") return docPart;
+  const stylesPart = parseAlternateContentPart(stylesXml);
+  if (stylesPart.kind === "error") return stylesPart;
+
+  if (docPart.altNodes.length === 0 && stylesPart.altNodes.length === 0) {
+    return {
+      kind: "ok",
+      profiles: [{ excludedSpans: [], projectedStylesXml: stylesXml }],
+    };
+  }
+
+  const uriIncidence = new Map<string, number[]>();
+  let globalChoiceSeq = 0;
+  for (const part of [docPart, stylesPart]) {
+    for (const alt of part.altNodes) {
+      for (const choice of alt.choices) {
+        const seq = globalChoiceSeq++;
+        for (const uri of choice.requiredUris) {
+          const list = uriIncidence.get(uri) ?? [];
+          list.push(seq);
+          uriIncidence.set(uri, list);
+        }
+      }
+    }
+  }
+
+  // Exact algebraic compression: URIs that appear in the exact same set of Choice
+  // elements are logically equivalent (every Choice requires ALL of its listed URIs).
+  const classIdByUri = new Map<string, number>();
+  const classSigToId = new Map<string, number>();
+  for (const [uri, seqs] of uriIncidence) {
+    const sig = seqs.join(",");
+    let cid = classSigToId.get(sig);
+    if (cid === undefined) {
+      cid = classSigToId.size;
+      classSigToId.set(sig, cid);
+    }
+    classIdByUri.set(uri, cid);
+  }
+  const classCount = classSigToId.size;
+  if (classCount > MAX_ALTERNATE_CONTENT_URI_CLASSES) {
+    return {
+      kind: "error",
+      reason: `文档包含 ${classCount} 组相互独立的 mc:AlternateContent 兼容命名空间能力（超过精确核验上限 ${MAX_ALTERNATE_CONTENT_URI_CLASSES}），无法保证所有 Word 版本下大纲与证据一致`,
+    };
+  }
+
+  const compileAltNodes = (nodes: readonly ParsedAltNode[]) =>
+    nodes.map((alt) => ({
+      altIdx: alt.altIdx,
+      choices: alt.choices.map((c) => {
+        let reqMask = 0;
+        for (const uri of c.requiredUris) {
+          reqMask |= 1 << classIdByUri.get(uri)!;
+        }
+        return { idx: c.idx, reqMask };
+      }),
+      fallbackIdx: alt.fallbackIdx,
+      allBranchIndices: alt.allBranchIndices,
+    }));
+
+  const docAltMasks = compileAltNodes(docPart.altNodes);
+  const stylesAltMasks = compileAltNodes(stylesPart.altNodes);
+  const sortedStylesAltIndices = stylesPart.altNodes
+    .map((alt) => alt.altIdx)
+    .sort((a, b) => stylesPart.elements[a].start - stylesPart.elements[b].start);
+
+  const profiles: AlternateContentProfile[] = [];
+  const seenProfileSigs = new Set<string>();
+  const projectedStylesCache = new Map<string, string>();
+  const totalMasks = 1 << classCount;
+  for (let mask = 0; mask < totalMasks; mask++) {
+    const excluded: XmlSpan[] = [];
+    for (const alt of docAltMasks) {
+      let chosen: number | null = null;
+      for (const choice of alt.choices) {
+        if ((mask & choice.reqMask) === choice.reqMask) {
+          chosen = choice.idx;
+          break;
+        }
+      }
+      if (chosen === null) chosen = alt.fallbackIdx;
+      for (const bIdx of alt.allBranchIndices) {
+        if (bIdx !== chosen) {
+          excluded.push({
+            start: docPart.elements[bIdx].start,
+            end: docPart.elements[bIdx].end,
+          });
+        }
+      }
+    }
+    const merged = mergeSortedSpans(excluded);
+    const docSig = merged.map((s) => `${s.start}:${s.end}`).join(",");
+
+    const chosenStylesBranchByAltIdx = new Map<number, number | null>();
+    const stylesSigParts: string[] = [];
+    for (const alt of stylesAltMasks) {
+      let chosen: number | null = null;
+      for (const choice of alt.choices) {
+        if ((mask & choice.reqMask) === choice.reqMask) {
+          chosen = choice.idx;
+          break;
+        }
+      }
+      if (chosen === null) chosen = alt.fallbackIdx;
+      chosenStylesBranchByAltIdx.set(alt.altIdx, chosen);
+      stylesSigParts.push(`${alt.altIdx}:${chosen ?? -1}`);
+    }
+    const stylesSig = stylesSigParts.join(",");
+    const profileSig = `${docSig}|${stylesSig}`;
+    if (seenProfileSigs.has(profileSig)) continue;
+    seenProfileSigs.add(profileSig);
+    if (profiles.length >= MAX_ALTERNATE_CONTENT_PROFILES) {
+      return {
+        kind: "error",
+        reason: `文档包含超过 ${MAX_ALTERNATE_CONTENT_PROFILES} 种可达的 mc:AlternateContent 兼容分支组合，无法完成全覆盖核验`,
+      };
+    }
+    let projectedStylesXml = projectedStylesCache.get(stylesSig);
+    if (projectedStylesXml === undefined) {
+      projectedStylesXml = projectXmlByAlternateChoices(
+        stylesXml,
+        stylesPart.elements,
+        sortedStylesAltIndices,
+        chosenStylesBranchByAltIdx,
+      );
+      projectedStylesCache.set(stylesSig, projectedStylesXml);
+    }
+    profiles.push({ excludedSpans: merged, projectedStylesXml });
+  }
+  return { kind: "ok", profiles };
+}
+
+type TableStyleConditionType =
+  | "wholeTable"
+  | "band1Vert"
+  | "band2Vert"
+  | "band1Horz"
+  | "band2Horz"
+  | "firstRow"
+  | "lastRow"
+  | "firstCol"
+  | "lastCol"
+  | "nwCell"
+  | "neCell"
+  | "swCell"
+  | "seCell";
+
+const TABLE_CELL_CONDITION_ORDER: readonly Exclude<TableStyleConditionType, "wholeTable">[] = [
+  "band1Vert",
+  "band2Vert",
+  "band1Horz",
+  "band2Horz",
+  "firstRow",
+  "lastRow",
+  "firstCol",
+  "lastCol",
+  "nwCell",
+  "neCell",
+  "swCell",
+  "seCell",
+];
+
+const TABLE_CONDITION_SET = new Set<string>(["wholeTable", ...TABLE_CELL_CONDITION_ORDER]);
+
+interface RunVisibilityProps {
+  vanish?: boolean;
+  webHidden?: boolean;
+}
+
+interface TableLookFlags {
+  firstRow: boolean;
+  lastRow: boolean;
+  firstCol: boolean;
+  lastCol: boolean;
+  noHBand: boolean;
+  noVBand: boolean;
+}
+
+interface TableStyleExtra {
+  rowBandSize?: number;
+  colBandSize?: number;
+  tblLook?: TableLookFlags;
+  conditions: ReadonlyMap<TableStyleConditionType, RunVisibilityProps>;
+}
+
+interface StyleVisibilityInfo {
+  styles: WordStyles | null;
+  defaultTable?: string;
+  defaultVanish: boolean;
+  defaultWebHidden: boolean;
+  vanishByStyleId: ReadonlyMap<string, boolean>;
+  webHiddenByStyleId: ReadonlyMap<string, boolean>;
+  tableExtrasByStyleId: ReadonlyMap<string, TableStyleExtra>;
+  hasAnyTableVisibility: boolean;
+}
+
+const isOffXmlVal = (val: string | undefined): boolean =>
+  val !== undefined && ["0", "false", "off"].includes(val.toLowerCase());
+
+const isTrueXmlAttr = (val: string | undefined): boolean =>
+  val !== undefined && ["1", "true", "on"].includes(val.toLowerCase());
+
+function parsePositiveIntVal(val: string | undefined): number | undefined {
+  if (!val || !/^\d+$/.test(val)) return undefined;
+  const n = Number(val);
+  return Number.isSafeInteger(n) && n >= 1 ? n : undefined;
+}
+
+function parseTblLookElement(
+  xml: string,
+  el: ReturnType<typeof xmlElements>[number],
+): TableLookFlags {
+  const attrs = xmlAttributes(xml, el);
+  const rawHex = attrs.get("w:val");
+  const mask = rawHex ? Number.parseInt(rawHex, 16) : 0;
+  const safeMask = Number.isFinite(mask) ? mask : 0;
+  const readFlag = (attrName: string, bit: number): boolean => {
+    const attrVal = attrs.get(attrName);
+    return attrVal !== undefined ? !isOffXmlVal(attrVal) : (safeMask & bit) !== 0;
+  };
+  return {
+    firstRow: readFlag("w:firstRow", 0x0020),
+    lastRow: readFlag("w:lastRow", 0x0040),
+    firstCol: readFlag("w:firstColumn", 0x0080),
+    lastCol: readFlag("w:lastColumn", 0x0100),
+    noHBand: readFlag("w:noHBand", 0x0200),
+    noVBand: readFlag("w:noVBand", 0x0400),
+  };
+}
+
+const CNF_BIT_ORDER: readonly TableStyleConditionType[] = [
+  "firstRow",
+  "lastRow",
+  "firstCol",
+  "lastCol",
+  "band1Vert",
+  "band2Vert",
+  "band1Horz",
+  "band2Horz",
+  "neCell",
+  "nwCell",
+  "seCell",
+  "swCell",
+];
+
+const CNF_ATTR_MAP: ReadonlyArray<readonly [string, TableStyleConditionType]> = [
+  ["w:firstRow", "firstRow"],
+  ["w:lastRow", "lastRow"],
+  ["w:firstColumn", "firstCol"],
+  ["w:lastColumn", "lastCol"],
+  ["w:oddVBand", "band1Vert"],
+  ["w:evenVBand", "band2Vert"],
+  ["w:oddHBand", "band1Horz"],
+  ["w:evenHBand", "band2Horz"],
+  ["w:firstRowLastColumn", "neCell"],
+  ["w:firstRowFirstColumn", "nwCell"],
+  ["w:lastRowLastColumn", "seCell"],
+  ["w:lastRowFirstColumn", "swCell"],
+];
+
+function parseCnfStyleElement(
+  xml: string,
+  el: ReturnType<typeof xmlElements>[number],
+): Set<TableStyleConditionType> {
+  const attrs = xmlAttributes(xml, el);
+  const active = new Set<TableStyleConditionType>();
+  const bits = attrs.get("w:val");
+  if (bits) {
+    for (let i = 0; i < CNF_BIT_ORDER.length && i < bits.length; i++) {
+      if (bits[i] === "1") active.add(CNF_BIT_ORDER[i]);
+    }
+  }
+  for (const [attrName, cond] of CNF_ATTR_MAP) {
+    const val = attrs.get(attrName);
+    if (val === undefined) continue;
+    if (!isOffXmlVal(val)) active.add(cond);
+    else active.delete(cond);
+  }
+  return active;
+}
+
+type StyleVisibilityResult =
+  | { kind: "ok"; visibility: StyleVisibilityInfo }
+  | { kind: "error"; reason: string };
+
+function parseStyleVisibility(stylesXml: string): StyleVisibilityResult {
+  if (!stylesXml) {
+    return {
+      kind: "ok",
+      visibility: {
+        styles: null,
+        defaultVanish: false,
+        defaultWebHidden: false,
+        vanishByStyleId: new Map(),
+        webHiddenByStyleId: new Map(),
+        tableExtrasByStyleId: new Map(),
+        hasAnyTableVisibility: false,
+      },
+    };
+  }
+  try {
+    const styles = wordStyles(stylesXml);
+    for (const style of styles.styles.values()) {
+      styleChain(styles, style.id, style.type);
+    }
+    let defaultTable: string | undefined;
+    let defaultVanish = false;
+    let defaultWebHidden = false;
+    let hasAnyTableVisibility = false;
+    const vanishByStyleId = new Map<string, boolean>();
+    const webHiddenByStyleId = new Map<string, boolean>();
+    const tableExtrasByStyleId = new Map<string, TableStyleExtra>();
+    const sElements = xmlElements(stylesXml);
+    const sChildren = elementChildren(sElements);
+    const root = sElements.findIndex((el) => el.name === "w:styles");
+    const findChild = (parent: number, name: string): number =>
+      parent < 0
+        ? -1
+        : (sChildren[parent].find((idx) => sElements[idx].name === name) ?? -1);
+    const getVal = (idx: number): string | undefined =>
+      idx < 0 ? undefined : xmlAttributes(stylesXml, sElements[idx]).get("w:val");
+    const readRPrVisibility = (rPrIdx: number): RunVisibilityProps => {
+      if (rPrIdx < 0) return {};
+      const props: RunVisibilityProps = {};
+      const vIdx = findChild(rPrIdx, "w:vanish");
+      if (vIdx >= 0) props.vanish = !isOffXmlVal(getVal(vIdx));
+      const whIdx = findChild(rPrIdx, "w:webHidden");
+      if (whIdx >= 0) props.webHidden = !isOffXmlVal(getVal(whIdx));
+      return props;
+    };
+    if (root >= 0) {
+      for (const idx of sChildren[root]) {
+        const el = sElements[idx];
+        if (el.name === "w:style") {
+          const attrs = xmlAttributes(stylesXml, el);
+          const styleId = attrs.get("w:styleId");
+          if (!styleId) continue;
+          const styleType = attrs.get("w:type") ?? "paragraph";
+          if (styleType === "table" && isTrueXmlAttr(attrs.get("w:default"))) {
+            defaultTable = styleId;
+          }
+          const rProps = readRPrVisibility(findChild(idx, "w:rPr"));
+          if (rProps.vanish !== undefined) vanishByStyleId.set(styleId, rProps.vanish);
+          if (rProps.webHidden !== undefined) webHiddenByStyleId.set(styleId, rProps.webHidden);
+          if (styleType === "table") {
+            if (rProps.vanish !== undefined || rProps.webHidden !== undefined) {
+              hasAnyTableVisibility = true;
+            }
+            const tblPrIdx = findChild(idx, "w:tblPr");
+            const rowBandSize = parsePositiveIntVal(
+              getVal(findChild(tblPrIdx, "w:tblStyleRowBandSize")),
+            );
+            const colBandSize = parsePositiveIntVal(
+              getVal(findChild(tblPrIdx, "w:tblStyleColBandSize")),
+            );
+            const tblLookIdx = findChild(tblPrIdx, "w:tblLook");
+            const tblLook =
+              tblLookIdx >= 0 ? parseTblLookElement(stylesXml, sElements[tblLookIdx]) : undefined;
+            const conditions = new Map<TableStyleConditionType, RunVisibilityProps>();
+            for (const childIdx of sChildren[idx]) {
+              if (sElements[childIdx].name !== "w:tblStylePr") continue;
+              const condType = xmlAttributes(stylesXml, sElements[childIdx]).get("w:type");
+              if (!condType || !TABLE_CONDITION_SET.has(condType)) continue;
+              const condProps = readRPrVisibility(findChild(childIdx, "w:rPr"));
+              if (condProps.vanish !== undefined || condProps.webHidden !== undefined) {
+                conditions.set(condType as TableStyleConditionType, condProps);
+                hasAnyTableVisibility = true;
+              }
+            }
+            if (
+              rowBandSize !== undefined ||
+              colBandSize !== undefined ||
+              tblLook !== undefined ||
+              conditions.size > 0
+            ) {
+              tableExtrasByStyleId.set(styleId, {
+                rowBandSize,
+                colBandSize,
+                tblLook,
+                conditions,
+              });
+            }
+          }
+        } else if (el.name === "w:docDefaults") {
+          const dProps = readRPrVisibility(findChild(findChild(idx, "w:rPrDefault"), "w:rPr"));
+          if (dProps.vanish !== undefined) defaultVanish = dProps.vanish;
+          if (dProps.webHidden !== undefined) defaultWebHidden = dProps.webHidden;
+        }
+      }
+    }
+    return {
+      kind: "ok",
+      visibility: {
+        styles,
+        defaultTable,
+        defaultVanish,
+        defaultWebHidden,
+        vanishByStyleId,
+        webHiddenByStyleId,
+        tableExtrasByStyleId,
+        hasAnyTableVisibility,
+      },
+    };
+  } catch (error) {
+    return {
+      kind: "error",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+interface CachedTableMeta {
+  tblStyleId?: string;
+  tblLook?: TableLookFlags;
+  rowBandSize?: number;
+  colBandSize?: number;
+  rowIndexByTr: Map<number, number>;
+  rowCount: number;
+}
+
+interface CachedRowMeta {
+  colIndexByTc: Map<number, number>;
+  colCount: number;
+  gridBefore: number;
+  gridAfter: number;
+  trCnf?: Set<TableStyleConditionType>;
+}
+
+interface TableLayoutCache {
+  tables: Map<number, CachedTableMeta>;
+  rows: Map<number, CachedRowMeta>;
+}
+
+function isCompatWrapperName(name: string): boolean {
+  const local = name.split(":").pop();
+  return local === "AlternateContent" || local === "Choice" || local === "Fallback";
+}
+
+function activeChildrenOf(
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  parentIdx: number,
+  excludedSpans: readonly XmlSpan[],
+): number[] {
+  const result: number[] = [];
+  const collect = (idx: number) => {
+    for (const childIdx of children[idx]) {
+      const child = elements[childIdx];
+      if (isSpanExcluded(child.start, child.end, excludedSpans)) continue;
+      if (isCompatWrapperName(child.name)) {
+        collect(childIdx);
+      } else {
+        result.push(childIdx);
+      }
+    }
+  };
+  collect(parentIdx);
+  return result;
+}
+
+function getCachedTableMeta(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  tblIdx: number,
+  excludedSpans: readonly XmlSpan[],
+  cache: TableLayoutCache,
+): CachedTableMeta {
+  const existing = cache.tables.get(tblIdx);
+  if (existing) return existing;
+  let tblStyleId: string | undefined;
+  let tblLook: TableLookFlags | undefined;
+  let rowBandSize: number | undefined;
+  let colBandSize: number | undefined;
+  const tblPrIdx = activeChildrenOf(elements, children, tblIdx, excludedSpans).find(
+    (c) => elements[c].name === "w:tblPr",
+  );
+  if (tblPrIdx !== undefined) {
+    for (const propIdx of activeChildrenOf(elements, children, tblPrIdx, excludedSpans)) {
+      const prop = elements[propIdx];
+      if (prop.name === "w:tblStyle") {
+        tblStyleId = xmlAttributes(docXml, prop).get("w:val");
+      } else if (prop.name === "w:tblLook") {
+        tblLook = parseTblLookElement(docXml, prop);
+      } else if (prop.name === "w:tblStyleRowBandSize") {
+        rowBandSize = parsePositiveIntVal(xmlAttributes(docXml, prop).get("w:val"));
+      } else if (prop.name === "w:tblStyleColBandSize") {
+        colBandSize = parsePositiveIntVal(xmlAttributes(docXml, prop).get("w:val"));
+      }
+    }
+  }
+  const rows: number[] = [];
+  const collectRows = (parentIdx: number) => {
+    for (const childIdx of children[parentIdx]) {
+      const child = elements[childIdx];
+      if (isSpanExcluded(child.start, child.end, excludedSpans)) continue;
+      const name = child.name;
+      if (name === "w:del" || name === "w:moveFrom" || name.endsWith("PrChange")) continue;
+      if (name === "w:tr") {
+        if (!isDeletedTableRow(elements, children, childIdx, excludedSpans)) {
+          rows.push(childIdx);
+        }
+      } else if (
+        name === "w:sdt" ||
+        name === "w:sdtContent" ||
+        name === "w:customXml" ||
+        name === "w:ins" ||
+        name === "w:moveTo" ||
+        isCompatWrapperName(name)
+      ) {
+        collectRows(childIdx);
+      }
+    }
+  };
+  collectRows(tblIdx);
+  const rowIndexByTr = new Map<number, number>();
+  rows.forEach((tr, i) => rowIndexByTr.set(tr, i));
+  const meta: CachedTableMeta = {
+    tblStyleId,
+    tblLook,
+    rowBandSize,
+    colBandSize,
+    rowIndexByTr,
+    rowCount: rows.length,
+  };
+  cache.tables.set(tblIdx, meta);
+  return meta;
+}
+
+function getCachedRowMeta(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  trIdx: number,
+  excludedSpans: readonly XmlSpan[],
+  cache: TableLayoutCache,
+): CachedRowMeta {
+  const existing = cache.rows.get(trIdx);
+  if (existing) return existing;
+  let gridBefore = 0;
+  let gridAfter = 0;
+  let trCnf: Set<TableStyleConditionType> | undefined;
+  const trPrIdx = activeChildrenOf(elements, children, trIdx, excludedSpans).find(
+    (c) => elements[c].name === "w:trPr",
+  );
+  if (trPrIdx !== undefined) {
+    for (const propIdx of activeChildrenOf(elements, children, trPrIdx, excludedSpans)) {
+      const prop = elements[propIdx];
+      if (prop.name === "w:gridBefore") {
+        gridBefore = parsePositiveIntVal(xmlAttributes(docXml, prop).get("w:val")) ?? 0;
+      } else if (prop.name === "w:gridAfter") {
+        gridAfter = parsePositiveIntVal(xmlAttributes(docXml, prop).get("w:val")) ?? 0;
+      } else if (prop.name === "w:cnfStyle") {
+        trCnf = parseCnfStyleElement(docXml, prop);
+      }
+    }
+  }
+  const cells: number[] = [];
+  const collectCells = (parentIdx: number) => {
+    for (const childIdx of children[parentIdx]) {
+      const child = elements[childIdx];
+      if (isSpanExcluded(child.start, child.end, excludedSpans)) continue;
+      const name = child.name;
+      if (name === "w:del" || name === "w:moveFrom" || name.endsWith("PrChange")) continue;
+      if (name === "w:tc") {
+        cells.push(childIdx);
+      } else if (
+        name === "w:sdt" ||
+        name === "w:sdtContent" ||
+        name === "w:customXml" ||
+        name === "w:ins" ||
+        name === "w:moveTo" ||
+        isCompatWrapperName(name)
+      ) {
+        collectCells(childIdx);
+      }
+    }
+  };
+  collectCells(trIdx);
+  const colIndexByTc = new Map<number, number>();
+  cells.forEach((tc, i) => colIndexByTc.set(tc, i));
+  const meta: CachedRowMeta = {
+    colIndexByTc,
+    colCount: cells.length,
+    gridBefore,
+    gridAfter,
+    trCnf,
+  };
+  cache.rows.set(trIdx, meta);
+  return meta;
+}
+
+function activeTableConditionsForCell(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  pPrIdx: number | undefined,
+  tcIdx: number,
+  trIdx: number,
+  tblIdx: number,
+  tableChain: readonly WordStyle[],
+  visibility: StyleVisibilityInfo,
+  excludedSpans: readonly XmlSpan[],
+  cache: TableLayoutCache,
+): Set<TableStyleConditionType> {
+  if (pPrIdx !== undefined) {
+    const pCnfIdx = activeChildrenOf(elements, children, pPrIdx, excludedSpans).find(
+      (c) => elements[c].name === "w:cnfStyle",
+    );
+    if (pCnfIdx !== undefined) return parseCnfStyleElement(docXml, elements[pCnfIdx]);
+  }
+  const tcPrIdx = activeChildrenOf(elements, children, tcIdx, excludedSpans).find(
+    (c) => elements[c].name === "w:tcPr",
+  );
+  if (tcPrIdx !== undefined) {
+    const tcCnfIdx = activeChildrenOf(elements, children, tcPrIdx, excludedSpans).find(
+      (c) => elements[c].name === "w:cnfStyle",
+    );
+    if (tcCnfIdx !== undefined) return parseCnfStyleElement(docXml, elements[tcCnfIdx]);
+  }
+
+  const tblMeta = getCachedTableMeta(docXml, elements, children, tblIdx, excludedSpans, cache);
+  const rowMeta = getCachedRowMeta(docXml, elements, children, trIdx, excludedSpans, cache);
+  let look: TableLookFlags = {
+    firstRow: false,
+    lastRow: false,
+    firstCol: false,
+    lastCol: false,
+    noHBand: false,
+    noVBand: false,
+  };
+  let rowBandSize = 1;
+  let colBandSize = 1;
+  for (const style of tableChain) {
+    const extra = visibility.tableExtrasByStyleId.get(style.id);
+    if (!extra) continue;
+    if (extra.tblLook) look = extra.tblLook;
+    if (extra.rowBandSize !== undefined) rowBandSize = extra.rowBandSize;
+    if (extra.colBandSize !== undefined) colBandSize = extra.colBandSize;
+  }
+  if (tblMeta.tblLook) look = tblMeta.tblLook;
+  if (tblMeta.rowBandSize !== undefined) rowBandSize = tblMeta.rowBandSize;
+  if (tblMeta.colBandSize !== undefined) colBandSize = tblMeta.colBandSize;
+
+  const rowIdx = tblMeta.rowIndexByTr.get(trIdx) ?? -1;
+  const colIdx = rowMeta.colIndexByTc.get(tcIdx) ?? -1;
+  const active = new Set<TableStyleConditionType>();
+  if (rowIdx < 0 || colIdx < 0) return active;
+
+  const trCnf = rowMeta.trCnf;
+  const isFirstRow = (trCnf?.has("firstRow") ?? false) || (look.firstRow && rowIdx === 0);
+  const isLastRow =
+    (trCnf?.has("lastRow") ?? false) || (look.lastRow && rowIdx === tblMeta.rowCount - 1);
+  const isFirstCol = look.firstCol && colIdx === 0 && rowMeta.gridBefore === 0;
+  const isLastCol =
+    look.lastCol && colIdx === rowMeta.colCount - 1 && rowMeta.gridAfter === 0;
+
+  if (trCnf?.has("band1Horz")) {
+    active.add("band1Horz");
+  } else if (trCnf?.has("band2Horz")) {
+    active.add("band2Horz");
+  } else if (!look.noHBand && !isFirstRow && !isLastRow) {
+    const hIdx = rowIdx - (look.firstRow ? 1 : 0);
+    if (hIdx >= 0) {
+      active.add(Math.floor(hIdx / rowBandSize) % 2 === 0 ? "band1Horz" : "band2Horz");
+    }
+  }
+
+  if (!look.noVBand && !isFirstCol && !isLastCol) {
+    const vIdx = colIdx - (look.firstCol ? 1 : 0);
+    if (vIdx >= 0) {
+      active.add(Math.floor(vIdx / colBandSize) % 2 === 0 ? "band1Vert" : "band2Vert");
+    }
+  }
+
+  if (isFirstRow) active.add("firstRow");
+  if (isLastRow) active.add("lastRow");
+  if (isFirstCol) active.add("firstCol");
+  if (isLastCol) active.add("lastCol");
+  if (isFirstRow && isFirstCol) active.add("nwCell");
+  if (isFirstRow && isLastCol) active.add("neCell");
+  if (isLastRow && isFirstCol) active.add("swCell");
+  if (isLastRow && isLastCol) active.add("seCell");
+  return active;
+}
+
+function isEffectiveHiddenRun(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  runIdx: number,
+  visibility: StyleVisibilityInfo,
+  excludedSpans: readonly XmlSpan[] = [],
+  tableCache?: TableLayoutCache,
+): boolean {
+  let pIdx: number | null = null;
+  let tcIdx: number | null = null;
+  let trIdx: number | null = null;
+  let tblIdx: number | null = null;
+  let cur = elements[runIdx].parent;
+  while (cur !== null) {
+    const name = elements[cur].name;
+    if (name === "w:txbxContent") break;
+    if (pIdx === null && name === "w:p") {
+      pIdx = cur;
+    } else if (tcIdx === null && name === "w:tc") {
+      tcIdx = cur;
+    } else if (tcIdx !== null && trIdx === null && name === "w:tr") {
+      trIdx = cur;
+    } else if (trIdx !== null && tblIdx === null && name === "w:tbl") {
+      tblIdx = cur;
+      break;
+    }
+    cur = elements[cur].parent;
+  }
+
+  let pPrIdx: number | undefined;
+  let pStyleId: string | undefined;
+  if (pIdx !== null) {
+    pPrIdx = activeChildrenOf(elements, children, pIdx, excludedSpans).find(
+      (c) => elements[c].name === "w:pPr",
+    );
+    if (pPrIdx !== undefined) {
+      const pStyleIdx = activeChildrenOf(elements, children, pPrIdx, excludedSpans).find(
+        (c) => elements[c].name === "w:pStyle",
+      );
+      if (pStyleIdx !== undefined) {
+        pStyleId = xmlAttributes(docXml, elements[pStyleIdx]).get("w:val");
+      }
+    }
+  }
+  let rStyleId: string | undefined;
+  let directVanish: boolean | undefined;
+  let directWebHidden: boolean | undefined;
+  for (const childIdx of activeChildrenOf(elements, children, runIdx, excludedSpans)) {
+    if (elements[childIdx].name !== "w:rPr") continue;
+    for (const propIdx of activeChildrenOf(elements, children, childIdx, excludedSpans)) {
+      const prop = elements[propIdx];
+      if (prop.name === "w:rStyle") {
+        rStyleId = xmlAttributes(docXml, prop).get("w:val");
+      } else if (prop.name === "w:vanish") {
+        directVanish = !isOffXmlVal(xmlAttributes(docXml, prop).get("w:val"));
+      } else if (prop.name === "w:webHidden") {
+        directWebHidden = !isOffXmlVal(xmlAttributes(docXml, prop).get("w:val"));
+      }
+    }
+  }
+
+  let vanish = visibility.defaultVanish;
+  let webHidden = visibility.defaultWebHidden;
+  if (visibility.styles) {
+    if (
+      visibility.hasAnyTableVisibility &&
+      tblIdx !== null &&
+      trIdx !== null &&
+      tcIdx !== null
+    ) {
+      const cache = tableCache ?? { tables: new Map(), rows: new Map() };
+      const tblMeta = getCachedTableMeta(
+        docXml,
+        elements,
+        children,
+        tblIdx,
+        excludedSpans,
+        cache,
+      );
+      const tblChain = styleChain(
+        visibility.styles,
+        tblMeta.tblStyleId ?? visibility.defaultTable,
+        "table",
+      );
+      if (tblChain.length > 0) {
+        let tableVanish: boolean | undefined;
+        let tableWebHidden: boolean | undefined;
+        for (const style of tblChain) {
+          const v = visibility.vanishByStyleId.get(style.id);
+          if (v !== undefined) tableVanish = v;
+          const wh = visibility.webHiddenByStyleId.get(style.id);
+          if (wh !== undefined) tableWebHidden = wh;
+          const wholeProps = visibility.tableExtrasByStyleId
+            .get(style.id)
+            ?.conditions.get("wholeTable");
+          if (wholeProps) {
+            if (wholeProps.vanish !== undefined) tableVanish = wholeProps.vanish;
+            if (wholeProps.webHidden !== undefined) tableWebHidden = wholeProps.webHidden;
+          }
+        }
+        const hasCellConds = tblChain.some((style) => {
+          const conds = visibility.tableExtrasByStyleId.get(style.id)?.conditions;
+          if (!conds || conds.size === 0) return false;
+          return conds.size > 1 || !conds.has("wholeTable");
+        });
+        if (hasCellConds) {
+          const activeConds = activeTableConditionsForCell(
+            docXml,
+            elements,
+            children,
+            pPrIdx,
+            tcIdx,
+            trIdx,
+            tblIdx,
+            tblChain,
+            visibility,
+            excludedSpans,
+            cache,
+          );
+          for (const cond of TABLE_CELL_CONDITION_ORDER) {
+            if (!activeConds.has(cond)) continue;
+            let condVanish: boolean | undefined;
+            let condWebHidden: boolean | undefined;
+            for (const style of tblChain) {
+              const condProps = visibility.tableExtrasByStyleId
+                .get(style.id)
+                ?.conditions.get(cond);
+              if (!condProps) continue;
+              if (condProps.vanish !== undefined) condVanish = condProps.vanish;
+              if (condProps.webHidden !== undefined) condWebHidden = condProps.webHidden;
+            }
+            if (condVanish !== undefined) tableVanish = condVanish;
+            if (condWebHidden !== undefined) tableWebHidden = condWebHidden;
+          }
+        }
+        if (tableVanish !== undefined) vanish = tableVanish;
+        if (tableWebHidden !== undefined) webHidden = tableWebHidden;
+      }
+    }
+
+    // Per MS-OI29500 (Word paragraph/table style assignment semantics) and conservative
+    // cross-consumer C17 visibility: any style layer setting <w:vanish/> keeps the run
+    // hidden unless a higher-precedence style layer or direct <w:rPr> explicitly turns it
+    // off with <w:vanish w:val="0|false|off"/> (never XOR-unhiding stacked <w:vanish/>).
+    const chain = [
+      ...styleChain(
+        visibility.styles,
+        pStyleId ?? visibility.styles.defaultParagraph,
+        "paragraph",
+      ),
+      ...styleChain(
+        visibility.styles,
+        rStyleId ?? visibility.styles.defaultCharacter,
+        "character",
+      ),
+    ];
+    for (const style of chain) {
+      const v = visibility.vanishByStyleId.get(style.id);
+      if (v !== undefined) vanish = v;
+      const wh = visibility.webHiddenByStyleId.get(style.id);
+      if (wh !== undefined) webHidden = wh;
+    }
+  }
+  if (directVanish !== undefined) vanish = directVanish;
+  if (directWebHidden !== undefined) webHidden = directWebHidden;
+  return vanish || webHidden;
+}
+
+function isHiddenMediaContainer(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  idx: number,
+  excludedSpans: readonly XmlSpan[] = [],
+): boolean {
+  const el = elements[idx];
+  const attrs = xmlAttributes(docXml, el);
+  const cssStyle = attrs.get("style");
+  if (
+    cssStyle &&
+    /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:;|$)/i.test(
+      cssStyle,
+    )
+  ) {
+    return true;
+  }
+  for (const childIdx of activeChildrenOf(elements, children, idx, excludedSpans)) {
+    const childLocal = elements[childIdx].name.split(":").pop() ?? "";
+    if (childLocal === "docPr" || childLocal === "cNvPr") {
+      if (isTrueXmlAttr(xmlAttributes(docXml, elements[childIdx]).get("hidden"))) {
+        return true;
+      }
+    } else if (childLocal.startsWith("nv") && childLocal.endsWith("Pr")) {
+      for (const grandIdx of activeChildrenOf(elements, children, childIdx, excludedSpans)) {
+        const grandLocal = elements[grandIdx].name.split(":").pop() ?? "";
+        if (
+          grandLocal === "cNvPr" &&
+          isTrueXmlAttr(xmlAttributes(docXml, elements[grandIdx]).get("hidden"))
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+interface ActiveTextFragment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function isDeletedTableRow(
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  trIdx: number,
+  excludedSpans: readonly XmlSpan[],
+): boolean {
+  for (const childIdx of activeChildrenOf(elements, children, trIdx, excludedSpans)) {
+    const child = elements[childIdx];
+    if (child.name !== "w:trPr") continue;
+    for (const propIdx of activeChildrenOf(elements, children, childIdx, excludedSpans)) {
+      const prop = elements[propIdx];
+      if (prop.name === "w:del" || prop.name === "w:moveFrom") return true;
+    }
+  }
+  return false;
+}
+
+function paragraphMarkState(
+  docXml: string,
+  elements: readonly ReturnType<typeof xmlElements>[number][],
+  children: readonly number[][],
+  pIdx: number,
+  excludedSpans: readonly XmlSpan[],
+): "normal" | "deleted" | "hidden" {
+  let hidden = false;
+  for (const childIdx of activeChildrenOf(elements, children, pIdx, excludedSpans)) {
+    const child = elements[childIdx];
+    if (child.name !== "w:pPr") continue;
+    for (const pPrChildIdx of activeChildrenOf(elements, children, childIdx, excludedSpans)) {
+      const pPrChild = elements[pPrChildIdx];
+      if (pPrChild.name !== "w:rPr") continue;
+      for (const rPrChildIdx of activeChildrenOf(elements, children, pPrChildIdx, excludedSpans)) {
+        const rPrChild = elements[rPrChildIdx];
+        if (rPrChild.name === "w:del" || rPrChild.name === "w:moveFrom") {
+          return "deleted";
+        }
+        if (
+          (rPrChild.name === "w:vanish" || rPrChild.name === "w:webHidden") &&
+          !isOffXmlVal(xmlAttributes(docXml, rPrChild).get("w:val"))
+        ) {
+          hidden = true;
+        }
+      }
+    }
+  }
+  return hidden ? "hidden" : "normal";
+}
+
+function visibleBodyNonTocParagraphInfos(
+  docXml: string,
+  visibility: StyleVisibilityInfo,
+  excludedSpans: readonly XmlSpan[] = [],
+  outActiveTextFragments?: ActiveTextFragment[],
+  outProjectionErrors?: string[],
+): VisibleBodyParagraphInfo[] {
   const elements = xmlElements(docXml);
   const children = elementChildren(elements);
   const bodyIndex = elements.findIndex((el) => el.name === "w:body");
   if (bodyIndex < 0) return [];
-
-  const isOffVal = (val: string | undefined): boolean =>
-    val !== undefined && ["0", "false", "off"].includes(val.toLowerCase());
+  const styles = visibility.styles;
 
   const isSkippedContainer = (name: string): boolean =>
     name === "w:del" ||
@@ -1572,31 +2846,87 @@ export function visibleBodyNonTocParagraphs(docXml: string): string[] {
     name === "w:object" ||
     name.endsWith("PrChange");
 
-  const isHiddenRun = (runIdx: number): boolean => {
-    for (const childIdx of children[runIdx]) {
-      const child = elements[childIdx];
-      if (child.name !== "w:rPr") continue;
-      for (const propIdx of children[childIdx]) {
-        const prop = elements[propIdx];
-        if (prop.name === "w:vanish" || prop.name === "w:webHidden") {
-          const val = xmlAttributes(docXml, prop).get("w:val");
-          if (!isOffVal(val)) return true;
-        }
-      }
-    }
-    return false;
-  };
+  const tableCache: TableLayoutCache = { tables: new Map(), rows: new Map() };
+  const isHiddenRun = (runIdx: number): boolean =>
+    isEffectiveHiddenRun(
+      docXml,
+      elements,
+      children,
+      runIdx,
+      visibility,
+      excludedSpans,
+      tableCache,
+    );
 
-  const paragraphs: string[] = [];
+  const paragraphs: VisibleBodyParagraphInfo[] = [];
   const fieldStack: Array<{ instr: string; separated: boolean; isToc: boolean }> =
     [];
   const insideTocField = (): boolean => fieldStack.some((frame) => frame.isToc);
   let currentParaParts: string[] | null = null;
   let fldSimpleTocDepth = 0;
+  let tableDepth = 0;
+
+  interface PendingMergedPara {
+    text: string;
+    start: number;
+    end: number;
+    headingLevel: number;
+    inTable: boolean;
+    strictDeleted: boolean;
+  }
+  const mergeStack: Array<PendingMergedPara | null> = [null];
+  const flushDanglingMerge = (reason: string): void => {
+    const topIdx = mergeStack.length - 1;
+    const pending = mergeStack[topIdx];
+    if (!pending) return;
+    mergeStack[topIdx] = null;
+    if (pending.strictDeleted) {
+      outProjectionErrors?.push(reason);
+      return;
+    }
+    if (pending.text.length > 0) {
+      paragraphs.push({
+        text: pending.text,
+        start: pending.start,
+        end: pending.end,
+        headingLevel: pending.headingLevel,
+        inTable: pending.inTable,
+      });
+    }
+  };
 
   const visit = (idx: number, inRun: boolean, runHidden: boolean): void => {
     const el = elements[idx];
     if (isSkippedContainer(el.name)) return;
+    if (isSpanExcluded(el.start, el.end, excludedSpans)) return;
+
+    if (el.name === "w:tbl") {
+      flushDanglingMerge("存在跨表格的段落标记修订删除（w:pPr/w:rPr/w:del），无法可靠投影章节边界");
+      tableDepth++;
+      for (const childIdx of children[idx]) {
+        visit(childIdx, false, false);
+      }
+      tableDepth--;
+      return;
+    }
+
+    if (el.name === "w:tr") {
+      if (isDeletedTableRow(elements, children, idx, excludedSpans)) return;
+      for (const childIdx of children[idx]) {
+        visit(childIdx, false, false);
+      }
+      return;
+    }
+
+    if (el.name === "w:tc") {
+      mergeStack.push(null);
+      for (const childIdx of children[idx]) {
+        visit(childIdx, false, false);
+      }
+      flushDanglingMerge("单元格末尾存在悬空的段落标记修订删除（w:pPr/w:rPr/w:del），无法可靠投影章节边界");
+      mergeStack.pop();
+      return;
+    }
 
     if (el.name === "w:p") {
       const prevParts = currentParaParts;
@@ -1605,8 +2935,42 @@ export function visibleBodyNonTocParagraphs(docXml: string): string[] {
         visit(childIdx, false, false);
       }
       const text = currentParaParts.join("");
-      if (text.length > 0) {
-        paragraphs.push(text);
+      const markState = paragraphMarkState(docXml, elements, children, idx, excludedSpans);
+      const headingLevel = paragraphHeadingLevel(
+        docXml,
+        elements,
+        children,
+        idx,
+        styles,
+        excludedSpans,
+      );
+      const topIdx = mergeStack.length - 1;
+      const pending = mergeStack[topIdx];
+      const mergedText = (pending ? pending.text : "") + text;
+      const mergedStart = pending ? pending.start : el.start;
+      const mergedInTable = pending ? pending.inTable : tableDepth > 0;
+      const mergedStrictDeleted =
+        (pending?.strictDeleted ?? false) || markState === "deleted";
+      if (markState === "deleted" || markState === "hidden") {
+        mergeStack[topIdx] = {
+          text: mergedText,
+          start: mergedStart,
+          end: el.end,
+          headingLevel,
+          inTable: mergedInTable,
+          strictDeleted: mergedStrictDeleted,
+        };
+      } else {
+        mergeStack[topIdx] = null;
+        if (mergedText.length > 0) {
+          paragraphs.push({
+            text: mergedText,
+            start: mergedStart,
+            end: el.end,
+            headingLevel,
+            inTable: mergedInTable,
+          });
+        }
       }
       currentParaParts = prevParts;
       return;
@@ -1666,17 +3030,25 @@ export function visibleBodyNonTocParagraphs(docXml: string): string[] {
       fldSimpleTocDepth === 0
     ) {
       if (el.name === "w:t") {
-        currentParaParts.push(
-          unescapeXml(docXml.slice(el.openEnd, el.closeStart)),
-        );
+        const text = unescapeXml(docXml.slice(el.openEnd, el.closeStart));
+        currentParaParts.push(text);
+        if (outActiveTextFragments && text.length > 0) {
+          outActiveTextFragments.push({ start: el.start, end: el.end, text });
+        }
         return;
       }
       if (el.name === "w:tab") {
         currentParaParts.push("\t");
+        if (outActiveTextFragments) {
+          outActiveTextFragments.push({ start: el.start, end: el.end, text: "\t" });
+        }
         return;
       }
       if (el.name === "w:br" || el.name === "w:cr") {
         currentParaParts.push("\n");
+        if (outActiveTextFragments) {
+          outActiveTextFragments.push({ start: el.start, end: el.end, text: "\n" });
+        }
         return;
       }
     }
@@ -1689,7 +3061,34 @@ export function visibleBodyNonTocParagraphs(docXml: string): string[] {
   for (const childIdx of children[bodyIndex]) {
     visit(childIdx, false, false);
   }
+  flushDanglingMerge("文档末尾存在悬空的段落标记修订删除（w:pPr/w:rPr/w:del），无法可靠投影章节边界");
   return paragraphs;
+}
+
+/**
+ * Extract visible body and table-cell paragraph texts from word/document.xml,
+ * excluding TOC field caches (begin..end whose instruction matches /\bTOC\b/i, and w:fldSimple),
+ * tracked deletions/moves (w:del, w:moveFrom, *PrChange), textboxes (w:txbxContent),
+ * and runs with active w:vanish or w:webHidden.
+ */
+export function visibleBodyNonTocParagraphs(docXml: string): string[] {
+  const result = alternateContentProfiles(docXml);
+  const excludedSpans =
+    result.kind === "ok" ? result.profiles[0].excludedSpans : [];
+  const emptyVisibility: StyleVisibilityInfo = {
+    styles: null,
+    defaultVanish: false,
+    defaultWebHidden: false,
+    vanishByStyleId: new Map(),
+    webHiddenByStyleId: new Map(),
+    tableExtrasByStyleId: new Map(),
+    hasAnyTableVisibility: false,
+  };
+  return visibleBodyNonTocParagraphInfos(
+    docXml,
+    emptyVisibility,
+    excludedSpans,
+  ).map((item) => item.text);
 }
 
 interface ActiveMediaItem {
@@ -1698,8 +3097,35 @@ interface ActiveMediaItem {
   hash: string;
 }
 
+function resolveStylesXml(parts: ReadonlyMap<string, Uint8Array>): string {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const relsBytes = parts.get("word/_rels/document.xml.rels");
+  if (relsBytes) {
+    const relsXml = decoder.decode(relsBytes);
+    for (const el of xmlElements(relsXml)) {
+      if (el.name.split(":").pop() !== "Relationship") continue;
+      const attrs = xmlAttributes(relsXml, el);
+      if (attrs.get("TargetMode") === "External") continue;
+      const type = attrs.get("Type") ?? "";
+      const target = attrs.get("Target");
+      if (type.endsWith("/relationships/styles") && target) {
+        const resolved = resolveRelationshipTarget("word/", target);
+        const bytes = parts.get(resolved);
+        if (!bytes) {
+          throw new Error(`缺失样式部件：${resolved}`);
+        }
+        return decoder.decode(bytes);
+      }
+    }
+  }
+  const fallback = parts.get("word/styles.xml");
+  return fallback ? decoder.decode(fallback) : "";
+}
+
 function activeDocumentMediaItems(
   parts: ReadonlyMap<string, Uint8Array>,
+  visibility: StyleVisibilityInfo,
+  excludedSpans: readonly XmlSpan[] = [],
 ): ActiveMediaItem[] {
   const items: ActiveMediaItem[] = [];
   const docBytes = parts.get("word/document.xml");
@@ -1725,33 +3151,68 @@ function activeDocumentMediaItems(
   }
 
   const elements = xmlElements(docXml);
-  const deletedMask = new Array<boolean>(elements.length).fill(false);
-  for (let i = 0; i < elements.length; i++) {
-    const el = elements[i];
-    const parentDeleted = el.parent !== null && deletedMask[el.parent];
-    deletedMask[i] =
-      parentDeleted ||
+  const children = elementChildren(elements);
+  const hashByTargetPath = new Map<string, string>();
+  const resolveMediaHash = (relId: string | undefined): string | undefined => {
+    if (!relId) return undefined;
+    const targetPath = relTargets.get(relId);
+    if (!targetPath) return undefined;
+    const cached = hashByTargetPath.get(targetPath);
+    if (cached !== undefined) return cached;
+    const mediaBytes = parts.get(targetPath);
+    if (!mediaBytes || mediaBytes.length === 0) return undefined;
+    const hash = sha256Hex(mediaBytes);
+    hashByTargetPath.set(targetPath, hash);
+    return hash;
+  };
+
+  const mediaTableCache: TableLayoutCache = { tables: new Map(), rows: new Map() };
+  const collectMedia = (idx: number): void => {
+    const el = elements[idx];
+    if (
       el.name === "w:del" ||
       el.name === "w:moveFrom" ||
-      el.name.endsWith("PrChange");
-    if (deletedMask[i]) continue;
-    const local = el.name.split(":").pop();
-    let relId: string | undefined;
-    if (local === "blip") {
-      relId = xmlAttributes(docXml, el).get("r:embed");
-    } else if (local === "imagedata") {
-      relId = xmlAttributes(docXml, el).get("r:id");
+      el.name.endsWith("PrChange")
+    ) {
+      return;
     }
-    if (!relId) continue;
-    const targetPath = relTargets.get(relId);
-    if (!targetPath) continue;
-    const mediaBytes = parts.get(targetPath);
-    if (mediaBytes && mediaBytes.length > 0) {
-      items.push({
-        start: el.start,
-        end: el.end,
-        hash: sha256Hex(mediaBytes),
-      });
+    if (isSpanExcluded(el.start, el.end, excludedSpans)) return;
+    if (el.name === "w:tr" && isDeletedTableRow(elements, children, idx, excludedSpans)) {
+      return;
+    }
+    if (
+      el.name === "w:r" &&
+      isEffectiveHiddenRun(
+        docXml,
+        elements,
+        children,
+        idx,
+        visibility,
+        excludedSpans,
+        mediaTableCache,
+      )
+    ) {
+      return;
+    }
+    if (isHiddenMediaContainer(docXml, elements, children, idx, excludedSpans)) return;
+
+    const local = el.name.split(":").pop();
+    if (local === "blip") {
+      const hash = resolveMediaHash(xmlAttributes(docXml, el).get("r:embed"));
+      if (hash) items.push({ start: el.start, end: el.end, hash });
+    } else if (local === "imagedata") {
+      const attrs = xmlAttributes(docXml, el);
+      const hash = resolveMediaHash(attrs.get("r:id") ?? attrs.get("o:relid"));
+      if (hash) items.push({ start: el.start, end: el.end, hash });
+    }
+    for (const childIdx of children[idx]) {
+      collectMedia(childIdx);
+    }
+  };
+
+  for (let i = 0; i < elements.length; i++) {
+    if (elements[i].parent === null) {
+      collectMedia(i);
     }
   }
   return items;
@@ -1799,8 +3260,18 @@ export async function checkOutlineConsistency(input: {
   }
 
   const nodesByVolume = new Map<string, OutlineNode[]>();
+  const excludedNodesByVolume = new Map<string, OutlineNode[]>();
+  const allNodesByVolume = new Map<string, OutlineNode[]>();
   for (const node of outline.nodes) {
-    if (!node.included) continue;
+    const allList = allNodesByVolume.get(node.volume) ?? [];
+    allList.push(node);
+    allNodesByVolume.set(node.volume, allList);
+    if (!node.included) {
+      const exList = excludedNodesByVolume.get(node.volume) ?? [];
+      exList.push(node);
+      excludedNodesByVolume.set(node.volume, exList);
+      continue;
+    }
     const list = nodesByVolume.get(node.volume) ?? [];
     list.push(node);
     nodesByVolume.set(node.volume, list);
@@ -1833,14 +3304,21 @@ export async function checkOutlineConsistency(input: {
       continue;
     }
 
-    const docXml = new TextDecoder("utf-8", { fatal: true }).decode(
-      parts.get("word/document.xml")!,
-    );
-    const normalizedParagraphs = visibleBodyNonTocParagraphs(docXml).map((text) =>
-      normalizeHeadingRaw(text),
-    );
-    const activeMediaItems = activeDocumentMediaItems(parts);
-    const activeMedia = new Set(activeMediaItems.map((item) => item.hash));
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const docXml = decoder.decode(parts.get("word/document.xml")!);
+    let stylesXml: string;
+    try {
+      stylesXml = resolveStylesXml(parts);
+    } catch (error) {
+      issues.push({
+        kind: "corrupt_draft",
+        draft: volumeName,
+        title: volumeName,
+        reason: `分册「${volumeName}」样式部件不可读，无法核验大纲与证据可见性：${error instanceof Error ? error.message : String(error)}`,
+        suggestion: "请修复分册样式定义后重新检查。",
+      });
+      continue;
+    }
     const activeRangeByName = new Map<string, SealRange>();
     try {
       for (const range of sealRanges(docXml)) {
@@ -1850,29 +3328,1042 @@ export async function checkOutlineConsistency(input: {
       /* Malformed bookmarks are also flagged by C10; leave activeRangeByName empty so missing evidence is caught conservatively. */
     }
 
-    const activeVolumeFills = ledger.fills.filter(
-      (fill) =>
-        fill &&
-        typeof fill === "object" &&
-        fill.draft === volumeName &&
-        fill.status !== "removed" &&
-        activeRangeByName.has(
-          fill.sealKind === "pending" ? `_Seal_P_${fill.id}` : `_Seal_F_${fill.id}`,
-        ),
+    // Precompute parent->children adjacency (in outline preorder) and transitive descendants.
+    const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    const childrenByParentId = new Map<string | null, OutlineNode[]>();
+    const descendantsByNodeId = new Map<string, Set<string>>();
+    for (const node of nodes) {
+      descendantsByNodeId.set(node.id, new Set([node.id]));
+      const parentKey =
+        node.parentId && nodeById.has(node.parentId) ? node.parentId : null;
+      const siblings = childrenByParentId.get(parentKey) ?? [];
+      siblings.push(node);
+      childrenByParentId.set(parentKey, siblings);
+    }
+    for (const node of nodes) {
+      const seenAncestors = new Set<string>([node.id]);
+      let parentId = node.parentId;
+      while (parentId && nodeById.has(parentId) && !seenAncestors.has(parentId)) {
+        seenAncestors.add(parentId);
+        descendantsByNodeId.get(parentId)!.add(node.id);
+        parentId = nodeById.get(parentId)!.parentId;
+      }
+    }
+    const excludedVolumeNodes = excludedNodesByVolume.get(volumeName) ?? [];
+    const allVolumeNodeById = new Map(
+      (allNodesByVolume.get(volumeName) ?? []).map((n) => [n.id, n]),
     );
+    const excludedAncestorsById = new Map<string, Set<string>>();
+    for (const exNode of excludedVolumeNodes) {
+      const ancestors = new Set<string>();
+      const seen = new Set<string>([exNode.id]);
+      let parentId = exNode.parentId;
+      while (
+        parentId &&
+        allVolumeNodeById.has(parentId) &&
+        !seen.has(parentId)
+      ) {
+        seen.add(parentId);
+        ancestors.add(parentId);
+        parentId = allVolumeNodeById.get(parentId)!.parentId;
+      }
+      excludedAncestorsById.set(exNode.id, ancestors);
+    }
+
+    const profilesResult = alternateContentProfiles(docXml, stylesXml);
+    if (profilesResult.kind === "error") {
+      issues.push({
+        kind: "corrupt_draft",
+        draft: volumeName,
+        title: volumeName,
+        reason: `分册「${volumeName}」无法完成大纲一致性核验：${profilesResult.reason}`,
+        suggestion:
+          "请清理或扁平化分册中复杂的 mc:AlternateContent 兼容分支后重新检查。",
+      });
+      continue;
+    }
+    const profiles = profilesResult.profiles;
+    const seenVolumeIssueKeys = new Set<string>();
+    const pushVolumeIssue = (issue: OutlineConsistencyIssue): void => {
+      const key = `${issue.kind}|${issue.draft ?? ""}|${issue.nodeId ?? ""}|${issue.source ?? ""}|${issue.ref ?? ""}`;
+      if (seenVolumeIssueKeys.has(key)) return;
+      seenVolumeIssueKeys.add(key);
+      issues.push(issue);
+    };
+
+    const docVisibleTokens = visibleTextPositions(docXml);
+    const visibilityByProjectedStyles = new Map<string, StyleVisibilityResult>();
+    for (const profile of profiles) {
+      let visibilityResult = visibilityByProjectedStyles.get(profile.projectedStylesXml);
+      if (!visibilityResult) {
+        visibilityResult = parseStyleVisibility(profile.projectedStylesXml);
+        visibilityByProjectedStyles.set(profile.projectedStylesXml, visibilityResult);
+      }
+      if (visibilityResult.kind === "error") {
+        pushVolumeIssue({
+          kind: "corrupt_draft",
+          draft: volumeName,
+          title: volumeName,
+          reason: `分册「${volumeName}」样式表损坏或存在继承循环，无法可靠核验大纲与证据可见性：${visibilityResult.reason}`,
+          suggestion: "请修复分册样式定义后重新检查。",
+        });
+        continue;
+      }
+      const styleVisibility = visibilityResult.visibility;
+      const excludedSpans = profile.excludedSpans;
+      const activeTextFragments: ActiveTextFragment[] = [];
+      const projectionErrors: string[] = [];
+      const paragraphInfos = visibleBodyNonTocParagraphInfos(
+        docXml,
+        styleVisibility,
+        excludedSpans,
+        activeTextFragments,
+        projectionErrors,
+      );
+      if (projectionErrors.length > 0) {
+        pushVolumeIssue({
+          kind: "corrupt_draft",
+          draft: volumeName,
+          title: volumeName,
+          reason: `分册「${volumeName}」无法可靠投影大纲章节结构：${projectionErrors[0]}`,
+          suggestion: "请先接受或清理文档中的段落标记修订后再重新检查。",
+        });
+        continue;
+      }
+      const activeFragmentByStart = new Map<number, ActiveTextFragment>();
+      for (const frag of activeTextFragments) {
+        activeFragmentByStart.set(frag.start, frag);
+      }
+      const sourceTextSatisfiedInRange = (
+        range: SealRange,
+        src: FactSource,
+        inSection?: (pos: number) => boolean,
+      ): boolean => {
+        const expected = displayedFactValue(src).replace(/\r\n/g, "\n");
+        if (!expected.trim()) return false;
+        if (src.rangeSpan) {
+          const { start: relStart, end: relEnd } = src.rangeSpan;
+          if (
+            relStart < 0 ||
+            relEnd <= relStart ||
+            range.start + relEnd > range.end
+          ) {
+            return false;
+          }
+          const absStart = range.start + relStart;
+          const absEnd = range.start + relEnd;
+          let collected = "";
+          for (const tok of docVisibleTokens) {
+            if (tok.end <= absStart) continue;
+            if (tok.start >= absEnd) break;
+            if (
+              tok.element.start < range.startXml ||
+              tok.element.end > range.endXml
+            ) {
+              return false;
+            }
+            if (inSection && !inSection(tok.element.start)) return false;
+            if (!activeFragmentByStart.has(tok.element.start)) return false;
+            const sliceStart = Math.max(0, absStart - tok.start);
+            const sliceEnd = Math.min(tok.text.length, absEnd - tok.start);
+            collected += tok.text.slice(sliceStart, sliceEnd);
+          }
+          return collected.replace(/\r\n/g, "\n") === expected;
+        }
+        // Legacy / unspanned bookmark: must stay wholly within the target section
+        // (cannot claim an aggregate cross-section bookmark without an exact sub-span).
+        if (
+          inSection &&
+          (!inSection(range.startXml) ||
+            !inSection(Math.max(range.startXml, range.endXml - 1)))
+        ) {
+          return false;
+        }
+        let visibleText = "";
+        for (const frag of activeTextFragments) {
+          if (frag.start < range.startXml || frag.end > range.endXml) continue;
+          if (inSection && !inSection(frag.start)) continue;
+          visibleText += frag.text;
+        }
+        return visibleText.replace(/\r\n/g, "\n").includes(expected);
+      };
+      const activeMediaItems = activeDocumentMediaItems(
+        parts,
+        styleVisibility,
+        excludedSpans,
+      );
+      const activeVolumeFills = ledger.fills.filter((fill) => {
+        if (
+          !fill ||
+          typeof fill !== "object" ||
+          fill.draft !== volumeName ||
+          fill.status === "removed"
+        ) {
+          return false;
+        }
+        const range = activeRangeByName.get(
+          fill.sealKind === "pending" ? `_Seal_P_${fill.id}` : `_Seal_F_${fill.id}`,
+        );
+        return (
+          range !== undefined &&
+          !isOffsetExcluded(range.startXml, excludedSpans) &&
+          !isOffsetExcluded(range.endXml, excludedSpans)
+        );
+      });
+
+    // Top-down parent-scoped tree-consistent anchor assignment:
+    // 1) Each sibling group matches strictly inside its nearest matched ancestor's XML span
+    //    (preventing cross-parent stealing or swapping among same-titled descendants).
+    // 2) Fast O(N) path uses rank-ordered maximum bipartite matching + rank-preserving monotonic
+    //    order restoration; when any matchable subtree node is missed or rank/order is suboptimal
+    //    among contested siblings, a bounded subtree-aware solver maximizes the lexicographic
+    //    objective (totalMatched DESC, totalRank ASC, totalInversions ASC, pIdxSum ASC) while
+    //    enforcing the maximality invariant (no unmatched sibling may leave a candidate unused).
+    const nativeHeadings: Array<{ para: VisibleBodyParagraphInfo; pIdx: number }> =
+      [];
+    for (let pIdx = 0; pIdx < paragraphInfos.length; pIdx++) {
+      if (paragraphInfos[pIdx].headingLevel > 0) {
+        nativeHeadings.push({ para: paragraphInfos[pIdx], pIdx });
+      }
+    }
+    interface CandidateParagraph {
+      pIdx: number;
+      rank: number;
+    }
+    const nodeCandidatesById = new Map<string, readonly CandidateParagraph[]>();
+    for (const node of nodes) {
+      const expected = node.expectedHeading?.trim()
+        ? node.expectedHeading
+        : node.title;
+      const fullNormalized = normalizeHeadingRaw(expected);
+      const variants = headingVariants(expected);
+      const scored: CandidateParagraph[] = [];
+      if (variants.length > 0) {
+        for (let pIdx = 0; pIdx < paragraphInfos.length; pIdx++) {
+          const para = paragraphInfos[pIdx];
+          if (!headingMatchesParagraph(para, variants)) continue;
+          const levelTier =
+            para.headingLevel === node.level
+              ? 0
+              : para.headingLevel > 0
+                ? 1
+                : 2;
+          const exactPenalty =
+            normalizeHeadingRaw(para.text) === fullNormalized ? 0 : 1;
+          scored.push({ pIdx, rank: levelTier * 2 + exactPenalty });
+        }
+      }
+      scored.sort((a, b) => a.rank - b.rank || a.pIdx - b.pIdx);
+      nodeCandidatesById.set(node.id, scored);
+    }
+    const strictDescendantParasByNodeId = new Map<string, Set<number>>();
+    for (const node of nodes) {
+      const set = new Set<number>();
+      for (const descId of descendantsByNodeId.get(node.id) ?? []) {
+        if (descId === node.id) continue;
+        for (const cand of nodeCandidatesById.get(descId) ?? []) {
+          set.add(cand.pIdx);
+        }
+      }
+      strictDescendantParasByNodeId.set(node.id, set);
+    }
+
+    const excludedBoundaryVariants = excludedVolumeNodes.map((exNode) => ({
+      nodeId: exNode.id,
+      variants: headingVariants(
+        exNode.expectedHeading?.trim() ? exNode.expectedHeading : exNode.title,
+      ),
+    }));
+    const excludedBoundaryParas: Array<{ nodeId: string; pIdx: number; start: number }> = [];
+    for (let pIdx = 0; pIdx < paragraphInfos.length; pIdx++) {
+      const para = paragraphInfos[pIdx];
+      for (const ex of excludedBoundaryVariants) {
+        if (ex.variants.length > 0 && headingMatchesParagraph(para, ex.variants)) {
+          excludedBoundaryParas.push({ nodeId: ex.nodeId, pIdx, start: para.start });
+        }
+      }
+    }
+
+    const computeSpanEnd = (
+      node: OutlineNode,
+      anchor: VisibleBodyParagraphInfo,
+      upperBound: number,
+      siblingStarts: readonly { nodeId: string; start: number }[],
+      claimedNodeByStart: ReadonlyMap<number, string>,
+      allowUnclaimedDescendantCandidates: boolean,
+    ): number => {
+      const descendants = descendantsByNodeId.get(node.id) ?? new Set([node.id]);
+      const isDescendantOrSelf = (candidateId: string): boolean =>
+        descendants.has(candidateId) ||
+        excludedAncestorsById.get(candidateId)?.has(node.id) === true;
+      const descendantCandParas = strictDescendantParasByNodeId.get(node.id);
+      const nextSiblingBoundary = siblingStarts.find(
+        (candidate) =>
+          candidate.start > anchor.start && !isDescendantOrSelf(candidate.nodeId),
+      );
+      const effectiveLevel =
+        anchor.headingLevel > 0 ? anchor.headingLevel : Math.max(1, node.level);
+      const nextNativeBoundary = nativeHeadings.find(({ para: heading, pIdx }) => {
+        if (heading.start <= anchor.start || heading.start >= upperBound) {
+          return false;
+        }
+        if (heading.headingLevel > effectiveLevel) return false;
+        const ownerId = claimedNodeByStart.get(heading.start);
+        if (ownerId !== undefined) {
+          return !isDescendantOrSelf(ownerId);
+        }
+        if (
+          allowUnclaimedDescendantCandidates &&
+          descendantCandParas?.has(pIdx)
+        ) {
+          return false;
+        }
+        return true;
+      });
+      const nextExcludedBoundary = excludedBoundaryParas.find(({ nodeId: exNodeId, pIdx, start }) => {
+        if (start <= anchor.start || start >= upperBound) return false;
+        if (isDescendantOrSelf(exNodeId)) return false;
+        const ownerId = claimedNodeByStart.get(start);
+        if (ownerId !== undefined) {
+          return !isDescendantOrSelf(ownerId);
+        }
+        if (
+          allowUnclaimedDescendantCandidates &&
+          descendantCandParas?.has(pIdx)
+        ) {
+          return false;
+        }
+        return true;
+      });
+      return Math.min(
+        upperBound,
+        nextSiblingBoundary ? nextSiblingBoundary.start : Number.POSITIVE_INFINITY,
+        nextNativeBoundary
+          ? nextNativeBoundary.para.start
+          : Number.POSITIVE_INFINITY,
+        nextExcludedBoundary ? nextExcludedBoundary.start : Number.POSITIVE_INFINITY,
+      );
+    };
+
+    interface GroupSolution {
+      totalMatched: number;
+      totalRank: number;
+      totalInversions: number;
+      pIdxSum: number;
+      searchUncertain: boolean;
+      assignedParaByNodeId: Map<string, number>;
+      sectionSpanByNodeId: Map<string, { start: number; end: number }>;
+    }
+    const isBetterSolution = (a: GroupSolution, b: GroupSolution): boolean => {
+      if (a.totalMatched !== b.totalMatched) return a.totalMatched > b.totalMatched;
+      if (a.totalRank !== b.totalRank) return a.totalRank < b.totalRank;
+      if (a.totalInversions !== b.totalInversions) {
+        return a.totalInversions < b.totalInversions;
+      }
+      return a.pIdxSum < b.pIdxSum;
+    };
+
+    const solveSiblingGroup = (
+      group: readonly OutlineNode[],
+      scope: { start: number; end: number },
+      usedParas: ReadonlySet<number>,
+      claimedNodeByStart: ReadonlyMap<number, string>,
+      searchBudget: { remaining: number },
+    ): GroupSolution => {
+      if (group.length === 0) {
+        return {
+          totalMatched: 0,
+          totalRank: 0,
+          totalInversions: 0,
+          pIdxSum: 0,
+          searchUncertain: false,
+          assignedParaByNodeId: new Map(),
+          sectionSpanByNodeId: new Map(),
+        };
+      }
+      const candidatesByMember = group.map((node) =>
+        (nodeCandidatesById.get(node.id) ?? []).filter((cand) => {
+          if (usedParas.has(cand.pIdx)) return false;
+          const start = paragraphInfos[cand.pIdx].start;
+          return start > scope.start && start < scope.end;
+        }),
+      );
+      const rankByMemberAndPara = candidatesByMember.map(
+        (list) => new Map(list.map((c) => [c.pIdx, c.rank])),
+      );
+      const candidateSetByMember = candidatesByMember.map(
+        (list) => new Set(list.map((c) => c.pIdx)),
+      );
+
+      // Step 1: Fast baseline via unoccupied-first maximum bipartite matching + monotonic swap.
+      const matchedMemberByPara = new Map<number, number>();
+      const tryAssignMember = (
+        memberIdx: number,
+        visitedParas: Set<number>,
+      ): boolean => {
+        for (const cand of candidatesByMember[memberIdx]) {
+          if (visitedParas.has(cand.pIdx)) continue;
+          if (!matchedMemberByPara.has(cand.pIdx)) {
+            visitedParas.add(cand.pIdx);
+            matchedMemberByPara.set(cand.pIdx, memberIdx);
+            return true;
+          }
+        }
+        for (const cand of candidatesByMember[memberIdx]) {
+          if (visitedParas.has(cand.pIdx)) continue;
+          visitedParas.add(cand.pIdx);
+          const ownerIdx = matchedMemberByPara.get(cand.pIdx);
+          if (ownerIdx === undefined || tryAssignMember(ownerIdx, visitedParas)) {
+            matchedMemberByPara.set(cand.pIdx, memberIdx);
+            return true;
+          }
+        }
+        return false;
+      };
+      for (let memberIdx = 0; memberIdx < group.length; memberIdx++) {
+        tryAssignMember(memberIdx, new Set<number>());
+      }
+      const baselineAssigned = new Map<number, number>();
+      for (const [pIdx, memberIdx] of matchedMemberByPara) {
+        baselineAssigned.set(memberIdx, pIdx);
+      }
+
+      let swapped = true;
+      while (swapped) {
+        swapped = false;
+        for (let i = 0; i < group.length; i++) {
+          let pI = baselineAssigned.get(i);
+          if (pI === undefined) continue;
+          for (let j = i + 1; j < group.length; j++) {
+            const pJ = baselineAssigned.get(j);
+            if (pJ === undefined) continue;
+            if (paragraphInfos[pI].start <= paragraphInfos[pJ].start) continue;
+            if (
+              !candidateSetByMember[i].has(pJ) ||
+              !candidateSetByMember[j].has(pI)
+            ) {
+              continue;
+            }
+            const beforeRank =
+              (rankByMemberAndPara[i].get(pI) ?? 99) +
+              (rankByMemberAndPara[j].get(pJ) ?? 99);
+            const afterRank =
+              (rankByMemberAndPara[i].get(pJ) ?? 99) +
+              (rankByMemberAndPara[j].get(pI) ?? 99);
+            if (afterRank <= beforeRank) {
+              baselineAssigned.set(i, pJ);
+              baselineAssigned.set(j, pI);
+              pI = pJ;
+              swapped = true;
+            }
+          }
+        }
+      }
+
+      const evaluateGroupAssignment = (
+        assignedParaByMember: ReadonlyMap<number, number>,
+        enforceMaximality: boolean,
+      ): GroupSolution | null => {
+        const localUsed = new Set<number>(usedParas);
+        const localClaimedByStart = new Map<number, string>(claimedNodeByStart);
+        const assignedParaByNodeId = new Map<string, number>();
+        const sectionSpanByNodeId = new Map<string, { start: number; end: number }>();
+        const groupClaimedStarts: Array<{ nodeId: string; start: number }> = [];
+        let totalMatched = 0;
+        let totalRank = 0;
+        let totalInversions = 0;
+        let pIdxSum = 0;
+        let childUncertain = false;
+
+        for (let i = 0; i < group.length; i++) {
+          const pIdx = assignedParaByMember.get(i);
+          if (pIdx === undefined) continue;
+          const node = group[i];
+          const anchor = paragraphInfos[pIdx];
+          localUsed.add(pIdx);
+          localClaimedByStart.set(anchor.start, node.id);
+          assignedParaByNodeId.set(node.id, pIdx);
+          groupClaimedStarts.push({ nodeId: node.id, start: anchor.start });
+          totalMatched++;
+          totalRank += rankByMemberAndPara[i].get(pIdx) ?? 99;
+          pIdxSum += pIdx;
+          for (let j = i + 1; j < group.length; j++) {
+            const pJ = assignedParaByMember.get(j);
+            if (pJ !== undefined && pIdx > pJ) totalInversions++;
+          }
+        }
+        groupClaimedStarts.sort((a, b) => a.start - b.start);
+
+        const memberOrder = [
+          ...group.map((_, i) => i).filter((i) => assignedParaByMember.has(i)),
+          ...group.map((_, i) => i).filter((i) => !assignedParaByMember.has(i)),
+        ];
+        for (const i of memberOrder) {
+          const node = group[i];
+          const pIdx = assignedParaByMember.get(i);
+          const children = childrenByParentId.get(node.id) ?? [];
+          if (pIdx === undefined) {
+            if (children.length > 0) {
+              const childSol = solveSiblingGroup(
+                children,
+                scope,
+                localUsed,
+                localClaimedByStart,
+                searchBudget,
+              );
+              totalMatched += childSol.totalMatched;
+              totalRank += childSol.totalRank;
+              totalInversions += childSol.totalInversions;
+              pIdxSum += childSol.pIdxSum;
+              if (childSol.searchUncertain) childUncertain = true;
+              for (const [cid, cpIdx] of childSol.assignedParaByNodeId) {
+                assignedParaByNodeId.set(cid, cpIdx);
+                localUsed.add(cpIdx);
+                localClaimedByStart.set(paragraphInfos[cpIdx].start, cid);
+              }
+              for (const [cid, cspan] of childSol.sectionSpanByNodeId) {
+                sectionSpanByNodeId.set(cid, cspan);
+              }
+            }
+            continue;
+          }
+
+          const anchor = paragraphInfos[pIdx];
+          let childScope = {
+            start: anchor.start,
+            end: computeSpanEnd(
+              node,
+              anchor,
+              scope.end,
+              groupClaimedStarts,
+              localClaimedByStart,
+              true,
+            ),
+          };
+          let childSol =
+            children.length > 0
+              ? solveSiblingGroup(
+                  children,
+                  childScope,
+                  localUsed,
+                  localClaimedByStart,
+                  searchBudget,
+                )
+              : null;
+
+          // Enforce parent-child span consistency: once children are placed, re-check
+          // native heading boundaries against actual claimed owners. If an unclaimed
+          // peer/higher heading cuts the parent's real span before a matched descendant,
+          // tighten childScope and re-solve until all matched descendants lie strictly inside.
+          while (childSol) {
+            const postClaimed = new Map(localClaimedByStart);
+            for (const [cid, cpIdx] of childSol.assignedParaByNodeId) {
+              postClaimed.set(paragraphInfos[cpIdx].start, cid);
+            }
+            const actualParentEnd = computeSpanEnd(
+              node,
+              anchor,
+              childScope.end,
+              groupClaimedStarts,
+              postClaimed,
+              false,
+            );
+            const hasOutOfBoundsDescendant = [
+              ...childSol.assignedParaByNodeId.values(),
+            ].some((cpIdx) => paragraphInfos[cpIdx].start >= actualParentEnd);
+            if (!hasOutOfBoundsDescendant) {
+              childScope = { start: anchor.start, end: actualParentEnd };
+              for (const [cid, cspan] of childSol.sectionSpanByNodeId) {
+                if (cspan.end > actualParentEnd) {
+                  childSol.sectionSpanByNodeId.set(cid, {
+                    start: cspan.start,
+                    end: actualParentEnd,
+                  });
+                }
+              }
+              break;
+            }
+            childScope = { start: anchor.start, end: actualParentEnd };
+            childSol = solveSiblingGroup(
+              children,
+              childScope,
+              localUsed,
+              localClaimedByStart,
+              searchBudget,
+            );
+          }
+
+          if (!childSol) {
+            childScope = {
+              start: anchor.start,
+              end: computeSpanEnd(
+                node,
+                anchor,
+                scope.end,
+                groupClaimedStarts,
+                localClaimedByStart,
+                false,
+              ),
+            };
+          }
+          sectionSpanByNodeId.set(node.id, childScope);
+          if (childSol) {
+            totalMatched += childSol.totalMatched;
+            totalRank += childSol.totalRank;
+            totalInversions += childSol.totalInversions;
+            pIdxSum += childSol.pIdxSum;
+            if (childSol.searchUncertain) childUncertain = true;
+            for (const [cid, cpIdx] of childSol.assignedParaByNodeId) {
+              assignedParaByNodeId.set(cid, cpIdx);
+              localUsed.add(cpIdx);
+              localClaimedByStart.set(paragraphInfos[cpIdx].start, cid);
+            }
+            for (const [cid, cspan] of childSol.sectionSpanByNodeId) {
+              sectionSpanByNodeId.set(cid, cspan);
+            }
+          }
+        }
+
+        if (enforceMaximality) {
+          for (let i = 0; i < group.length; i++) {
+            if (assignedParaByMember.has(i)) continue;
+            for (const cand of candidatesByMember[i]) {
+              if (!localUsed.has(cand.pIdx)) return null;
+            }
+          }
+        }
+
+        return {
+          totalMatched,
+          totalRank,
+          totalInversions,
+          pIdxSum,
+          searchUncertain: childUncertain,
+          assignedParaByNodeId,
+          sectionSpanByNodeId,
+        };
+      };
+
+      let bestSol = evaluateGroupAssignment(baselineAssigned, false)!;
+      let bestAssigned: ReadonlyMap<number, number> = baselineAssigned;
+
+      // Step 2: Compute exact pigeonhole coverage upper bound and lower-bound rank.
+      let maxMatchableNodes = 0;
+      let minPossibleSubtreeRank = 0;
+      const distinctSubtreeParas = new Set<number>();
+      for (const rootNode of group) {
+        for (const descId of descendantsByNodeId.get(rootNode.id) ?? []) {
+          let bestRank = Number.POSITIVE_INFINITY;
+          for (const cand of nodeCandidatesById.get(descId) ?? []) {
+            if (usedParas.has(cand.pIdx)) continue;
+            const start = paragraphInfos[cand.pIdx].start;
+            if (start <= scope.start || start >= scope.end) continue;
+            distinctSubtreeParas.add(cand.pIdx);
+            if (cand.rank < bestRank) bestRank = cand.rank;
+          }
+          if (bestRank < Number.POSITIVE_INFINITY) {
+            maxMatchableNodes++;
+            minPossibleSubtreeRank += bestRank;
+          }
+        }
+      }
+      const maxPossibleMatched = Math.min(
+        maxMatchableNodes,
+        distinctSubtreeParas.size,
+      );
+      const isPerfectSolution = (sol: GroupSolution): boolean =>
+        sol.totalMatched === maxPossibleMatched &&
+        sol.totalMatched === maxMatchableNodes &&
+        sol.totalRank <= minPossibleSubtreeRank &&
+        sol.totalInversions === 0;
+
+      const sameAssignment = (
+        a: ReadonlyMap<number, number>,
+        b: ReadonlyMap<number, number>,
+      ): boolean => {
+        if (a.size !== b.size) return false;
+        for (const [k, v] of a) {
+          if (b.get(k) !== v) return false;
+        }
+        return true;
+      };
+
+      // Step 2b: Exact O(M * P) preorder tree-DP seed solves arbitrarily large preorder
+      // identical-title outlines (e.g. 3x3 or 20x5 same-titled subtrees) in polynomial time.
+      if (!isPerfectSolution(bestSol)) {
+        const preorderNodes: OutlineNode[] = [];
+        const collectPreorder = (list: readonly OutlineNode[]): void => {
+          for (const n of list) {
+            preorderNodes.push(n);
+            const ch = childrenByParentId.get(n.id);
+            if (ch && ch.length > 0) collectPreorder(ch);
+          }
+        };
+        collectPreorder(group);
+        const inScopeParas = [...distinctSubtreeParas].sort((a, b) => a - b);
+        const M = preorderNodes.length;
+        const P = inScopeParas.length;
+        if (M > 0 && P > 0 && M * P <= 200_000) {
+          const paraPosByIdx = new Map<number, number>();
+          for (let pos = 0; pos < P; pos++) {
+            paraPosByIdx.set(inScopeParas[pos], pos);
+          }
+          const rankByNodeAndPos = preorderNodes.map((n) => {
+            const map = new Map<number, number>();
+            for (const cand of nodeCandidatesById.get(n.id) ?? []) {
+              const pos = paraPosByIdx.get(cand.pIdx);
+              if (pos !== undefined) map.set(pos, cand.rank);
+            }
+            return map;
+          });
+          const stride = P + 1;
+          const dpMatch = new Int32Array((M + 1) * stride);
+          const dpRank = new Int32Array((M + 1) * stride);
+          const dpPIdxSum = new Int32Array((M + 1) * stride);
+          const dpChoice = new Uint8Array((M + 1) * stride);
+          const isBetterDp = (
+            m1: number,
+            r1: number,
+            s1: number,
+            m2: number,
+            r2: number,
+            s2: number,
+          ): boolean =>
+            m1 !== m2 ? m1 > m2 : r1 !== r2 ? r1 < r2 : s1 < s2;
+
+          for (let k = M - 1; k >= 0; k--) {
+            const nodeRanks = rankByNodeAndPos[k];
+            for (let pos = P - 1; pos >= 0; pos--) {
+              const idx = k * stride + pos;
+              const skipNodeIdx = (k + 1) * stride + pos;
+              let bestM = dpMatch[skipNodeIdx];
+              let bestR = dpRank[skipNodeIdx];
+              let bestS = dpPIdxSum[skipNodeIdx];
+              let bestC = 0;
+
+              const skipParaIdx = k * stride + (pos + 1);
+              if (
+                isBetterDp(
+                  dpMatch[skipParaIdx],
+                  dpRank[skipParaIdx],
+                  dpPIdxSum[skipParaIdx],
+                  bestM,
+                  bestR,
+                  bestS,
+                )
+              ) {
+                bestM = dpMatch[skipParaIdx];
+                bestR = dpRank[skipParaIdx];
+                bestS = dpPIdxSum[skipParaIdx];
+                bestC = 1;
+              }
+
+              const candRank = nodeRanks.get(pos);
+              if (candRank !== undefined) {
+                const diagIdx = (k + 1) * stride + (pos + 1);
+                const m = 1 + dpMatch[diagIdx];
+                const r = candRank + dpRank[diagIdx];
+                const s = inScopeParas[pos] + dpPIdxSum[diagIdx];
+                if (isBetterDp(m, r, s, bestM, bestR, bestS)) {
+                  bestM = m;
+                  bestR = r;
+                  bestS = s;
+                  bestC = 2;
+                }
+              }
+
+              dpMatch[idx] = bestM;
+              dpRank[idx] = bestR;
+              dpPIdxSum[idx] = bestS;
+              dpChoice[idx] = bestC;
+            }
+          }
+
+          const rootMemberIdxByNodeId = new Map(group.map((n, i) => [n.id, i]));
+          const preorderAssigned = new Map<number, number>();
+          let k = 0;
+          let pos = 0;
+          while (k < M && pos < P) {
+            const choice = dpChoice[k * stride + pos];
+            if (choice === 2) {
+              const memberIdx = rootMemberIdxByNodeId.get(preorderNodes[k].id);
+              if (memberIdx !== undefined) {
+                preorderAssigned.set(memberIdx, inScopeParas[pos]);
+              }
+              k++;
+              pos++;
+            } else if (choice === 1) {
+              pos++;
+            } else {
+              k++;
+            }
+          }
+          if (!sameAssignment(preorderAssigned, baselineAssigned)) {
+            const preorderSol = evaluateGroupAssignment(preorderAssigned, true);
+            if (preorderSol && isBetterSolution(preorderSol, bestSol)) {
+              bestSol = preorderSol;
+              bestAssigned = preorderAssigned;
+            }
+          }
+        }
+      }
+
+      if (isPerfectSolution(bestSol)) {
+        return bestSol;
+      }
+
+      // Partition members into fixed (uncontested single candidate or no candidate) vs variable.
+      interface VariableMember {
+        memberIdx: number;
+        domain: Array<number | null>;
+        domainSet: Set<number | null>;
+      }
+      const fixedAssigned = new Map<number, number>();
+      const variableMembers: VariableMember[] = [];
+      for (let i = 0; i < group.length; i++) {
+        const cands = candidatesByMember[i];
+        if (cands.length === 0) continue;
+        const contested = new Set<number>();
+        for (let j = 0; j < group.length; j++) {
+          if (j === i) continue;
+          for (const other of candidatesByMember[j]) contested.add(other.pIdx);
+          for (const descP of strictDescendantParasByNodeId.get(group[j].id) ?? []) {
+            contested.add(descP);
+          }
+        }
+        if (cands.length === 1 && !contested.has(cands[0].pIdx)) {
+          fixedAssigned.set(i, cands[0].pIdx);
+          continue;
+        }
+        const domain: Array<number | null> = cands.map((c) => c.pIdx);
+        if (cands.every((c) => contested.has(c.pIdx))) {
+          domain.push(null);
+        }
+        variableMembers.push({
+          memberIdx: i,
+          domain,
+          domainSet: new Set(domain),
+        });
+      }
+      if (variableMembers.length === 0) return bestSol;
+
+      variableMembers.sort(
+        (a, b) => a.domain.length - b.domain.length || a.memberIdx - b.memberIdx,
+      );
+      let searchSpaceSize = 1;
+      for (const v of variableMembers) {
+        searchSpaceSize *= v.domain.length;
+        if (searchSpaceSize > 256) break;
+      }
+
+      let searchTruncated = false;
+      if (searchSpaceSize <= 256 && searchBudget.remaining > 0) {
+        const currentAssigned = new Map<number, number>(fixedAssigned);
+        const usedInGroup = new Set<number>(fixedAssigned.values());
+        let foundPerfect = false;
+        const dfs = (vIdx: number): void => {
+          if (foundPerfect) return;
+          if (searchBudget.remaining <= 0) {
+            searchTruncated = true;
+            return;
+          }
+          if (vIdx === variableMembers.length) {
+            if (
+              sameAssignment(currentAssigned, baselineAssigned) ||
+              sameAssignment(currentAssigned, bestAssigned)
+            ) {
+              return;
+            }
+            searchBudget.remaining--;
+            const sol = evaluateGroupAssignment(currentAssigned, true);
+            if (sol && isBetterSolution(sol, bestSol)) {
+              bestSol = sol;
+              bestAssigned = new Map(currentAssigned);
+              if (isPerfectSolution(bestSol)) foundPerfect = true;
+            }
+            return;
+          }
+          const v = variableMembers[vIdx];
+          for (const cand of v.domain) {
+            if (cand !== null && usedInGroup.has(cand)) continue;
+            if (cand !== null) {
+              usedInGroup.add(cand);
+              currentAssigned.set(v.memberIdx, cand);
+            }
+            dfs(vIdx + 1);
+            if (cand !== null) {
+              usedInGroup.delete(cand);
+              currentAssigned.delete(v.memberIdx);
+            }
+            if (foundPerfect || searchTruncated) return;
+          }
+        };
+        dfs(0);
+      } else {
+        searchTruncated = true;
+        // Bounded multi-pass coordinate descent + pairwise swap for pathological large conflict sets.
+        const currentAssigned = new Map<number, number>(bestAssigned);
+        const currentUsedInGroup = new Set<number>(bestAssigned.values());
+        let improved = true;
+        while (improved && searchBudget.remaining > 0 && !isPerfectSolution(bestSol)) {
+          improved = false;
+          for (const v of variableMembers) {
+            if (searchBudget.remaining <= 0 || isPerfectSolution(bestSol)) break;
+            let prev: number | null = currentAssigned.get(v.memberIdx) ?? null;
+            for (const cand of v.domain) {
+              if (cand === prev) continue;
+              if (cand !== null && currentUsedInGroup.has(cand)) continue;
+              if (searchBudget.remaining <= 0) break;
+              if (prev !== null) currentUsedInGroup.delete(prev);
+              if (cand !== null) {
+                currentUsedInGroup.add(cand);
+                currentAssigned.set(v.memberIdx, cand);
+              } else {
+                currentAssigned.delete(v.memberIdx);
+              }
+              searchBudget.remaining--;
+              const sol = evaluateGroupAssignment(currentAssigned, true);
+              if (sol && isBetterSolution(sol, bestSol)) {
+                bestSol = sol;
+                prev = cand;
+                improved = true;
+                if (isPerfectSolution(bestSol)) break;
+              } else {
+                if (cand !== null) currentUsedInGroup.delete(cand);
+                if (prev !== null) {
+                  currentUsedInGroup.add(prev);
+                  currentAssigned.set(v.memberIdx, prev);
+                } else {
+                  currentAssigned.delete(v.memberIdx);
+                }
+              }
+            }
+          }
+          for (let a = 0; a < variableMembers.length; a++) {
+            if (searchBudget.remaining <= 0 || isPerfectSolution(bestSol)) break;
+            const vA = variableMembers[a];
+            for (let b = a + 1; b < variableMembers.length; b++) {
+              if (searchBudget.remaining <= 0 || isPerfectSolution(bestSol)) break;
+              const vB = variableMembers[b];
+              const pA: number | null = currentAssigned.get(vA.memberIdx) ?? null;
+              const pB: number | null = currentAssigned.get(vB.memberIdx) ?? null;
+              if (pA === pB) continue;
+              if (!vA.domainSet.has(pB) || !vB.domainSet.has(pA)) continue;
+              if (pB !== null) currentAssigned.set(vA.memberIdx, pB);
+              else currentAssigned.delete(vA.memberIdx);
+              if (pA !== null) currentAssigned.set(vB.memberIdx, pA);
+              else currentAssigned.delete(vB.memberIdx);
+              searchBudget.remaining--;
+              const sol = evaluateGroupAssignment(currentAssigned, true);
+              if (sol && isBetterSolution(sol, bestSol)) {
+                bestSol = sol;
+                improved = true;
+              } else {
+                if (pA !== null) currentAssigned.set(vA.memberIdx, pA);
+                else currentAssigned.delete(vA.memberIdx);
+                if (pB !== null) currentAssigned.set(vB.memberIdx, pB);
+                else currentAssigned.delete(vB.memberIdx);
+              }
+            }
+          }
+        }
+      }
+
+      if (searchTruncated && bestSol.totalMatched < maxPossibleMatched) {
+        return { ...bestSol, searchUncertain: true };
+      }
+      return bestSol;
+    };
+
+    const rootSolution = solveSiblingGroup(
+      childrenByParentId.get(null) ?? [],
+      { start: -1, end: Number.POSITIVE_INFINITY },
+      new Set<number>(),
+      new Map<number, string>(),
+      { remaining: 1024 },
+    );
+    if (rootSolution.searchUncertain) {
+      pushVolumeIssue({
+        kind: "corrupt_draft",
+        draft: volumeName,
+        title: volumeName,
+        reason: `分册「${volumeName}」存在过多同名冲突标题，大纲章节归属搜索超出精确核验上限，无法可靠确认章节完整性`,
+        suggestion: "请为同名章节补充唯一编号或规范 Word 标题层级后重新检查。",
+      });
+      continue;
+    }
+
+    const claimedNodeIdByStart = new Map<number, string>();
+    const claimedAnchorByNodeId = new Map<string, VisibleBodyParagraphInfo>();
+    for (const [nodeId, pIdx] of rootSolution.assignedParaByNodeId) {
+      const anchor = paragraphInfos[pIdx];
+      claimedAnchorByNodeId.set(nodeId, anchor);
+      claimedNodeIdByStart.set(anchor.start, nodeId);
+    }
+    const sectionSpanByNodeId = new Map(rootSolution.sectionSpanByNodeId);
+
+    // Reconcile final section spans top-down against all claimed anchors (and excluded
+    // outline boundaries via computeSpanEnd) so parent-child containment always holds.
+    let containmentChanged = true;
+    while (containmentChanged) {
+      containmentChanged = false;
+      const allClaimedAnchors = [...claimedAnchorByNodeId.entries()]
+        .map(([nodeId, anchor]) => ({
+          nodeId,
+          start: anchor.start,
+        }))
+        .sort((a, b) => a.start - b.start);
+      const enforceContainment = (
+        group: readonly OutlineNode[],
+        parentSpan: { start: number; end: number } | null,
+      ): void => {
+        for (const node of group) {
+          const anchor = claimedAnchorByNodeId.get(node.id);
+          let nextParentSpan = parentSpan;
+          if (anchor) {
+            if (
+              parentSpan &&
+              (anchor.start <= parentSpan.start || anchor.start >= parentSpan.end)
+            ) {
+              claimedAnchorByNodeId.delete(node.id);
+              claimedNodeIdByStart.delete(anchor.start);
+              sectionSpanByNodeId.delete(node.id);
+              containmentChanged = true;
+            } else {
+              const existing = sectionSpanByNodeId.get(node.id)!;
+              const upperBound = parentSpan
+                ? Math.min(existing.end, parentSpan.end)
+                : existing.end;
+              const refinedEnd = computeSpanEnd(
+                node,
+                anchor,
+                upperBound,
+                allClaimedAnchors,
+                claimedNodeIdByStart,
+                false,
+              );
+              const updatedSpan = { start: anchor.start, end: refinedEnd };
+              sectionSpanByNodeId.set(node.id, updatedSpan);
+              nextParentSpan = updatedSpan;
+            }
+          }
+          const children = childrenByParentId.get(node.id) ?? [];
+          if (children.length > 0) {
+            enforceContainment(children, nextParentSpan);
+          }
+        }
+      };
+      enforceContainment(childrenByParentId.get(null) ?? [], null);
+    }
 
     for (const node of nodes) {
       const expected = node.expectedHeading?.trim()
         ? node.expectedHeading
         : node.title;
-      const variants = headingVariants(expected);
-      const hasSection =
-        variants.length > 0 &&
-        normalizedParagraphs.some((paragraphText) =>
-          variants.some((variant) => paragraphText.includes(variant)),
-        );
+      const sectionSpan = sectionSpanByNodeId.get(node.id);
+      const hasSection = sectionSpan !== undefined;
       if (!hasSection) {
-        issues.push({
+        pushVolumeIssue({
           kind: "missing_section",
           draft: volumeName,
           nodeId: node.id,
@@ -1882,13 +4373,13 @@ export async function checkOutlineConsistency(input: {
           suggestion: `请在分册「${volumeName}」补齐章节「${expected}」。`,
         });
       }
+      const inNodeSection = (pos: number): boolean =>
+        sectionSpan ? pos >= sectionSpan.start && pos < sectionSpan.end : true;
 
       for (const binding of node.evidence ?? []) {
         if (binding.source === "kb") {
           const isKbMaterial = input.kbMaterialIds?.has(binding.ref) === true;
-          let requireMedia =
-            (node.kind === "attachment" || isKbMaterial) &&
-            input.kbRecordHasFiles?.get(binding.ref) === true;
+          let requireMedia = input.kbRecordHasFiles?.get(binding.ref) === true;
           let expectedKbHashes: readonly string[] | undefined;
           let kbMediaError: string | undefined;
           let kbMediaIsNoImages = false;
@@ -1899,24 +4390,23 @@ export async function checkOutlineConsistency(input: {
             } else if (mediaState.kind === "error") {
               kbMediaError = mediaState.reason;
             } else if (mediaState.kind === "ok") {
-              if (node.kind === "attachment" || isKbMaterial) {
-                requireMedia = true;
-                if (mediaState.hashes.length === 0) {
-                  kbMediaError = "知识库记录图片哈希为空";
-                } else {
-                  expectedKbHashes = mediaState.hashes;
-                }
+              requireMedia = true;
+              if (mediaState.hashes.length === 0) {
+                kbMediaError = "知识库记录图片哈希为空";
+              } else {
+                expectedKbHashes = mediaState.hashes;
               }
             } else if (mediaState.kind === "no_images") {
               kbMediaIsNoImages = true;
               if (requireMedia && node.kind === "attachment") {
                 kbMediaError = "知识库记录未包含可核验的图片附件";
-              } else if (isKbMaterial) {
+              } else {
                 requireMedia = false;
               }
             }
-          } else if (requireMedia && input.kbRecordImageHashes?.has(binding.ref)) {
+          } else if (input.kbRecordImageHashes?.has(binding.ref)) {
             const provided = input.kbRecordImageHashes.get(binding.ref)!;
+            requireMedia = true;
             if (provided.length === 0) {
               kbMediaError = "知识库记录图片哈希为空";
             } else {
@@ -1924,7 +4414,7 @@ export async function checkOutlineConsistency(input: {
             }
           }
           if (kbMediaError) {
-            issues.push({
+            pushVolumeIssue({
               kind: "missing_evidence",
               draft: volumeName,
               nodeId: node.id,
@@ -1948,47 +4438,135 @@ export async function checkOutlineConsistency(input: {
             // verified above and section presence is enforced by missing_section.
             continue;
           }
-          const mounted = activeVolumeFills.some((fill) => {
-            const hasMatchingSource = (fill.sources ?? []).some(
+          const matchingFills = activeVolumeFills.filter((fill) =>
+            (fill.sources ?? []).some(
               (src) =>
                 (src.recordId === binding.ref ||
                   src.materialId === binding.ref) &&
                 (!requireMedia || src.media === true),
-            );
-            if (!hasMatchingSource) return false;
-            if (!requireMedia) return true;
-            const bookmarkName =
-              fill.sealKind === "pending"
-                ? `_Seal_P_${fill.id}`
-                : `_Seal_F_${fill.id}`;
-            const range = activeRangeByName.get(bookmarkName);
-            if (!range) return false;
-            const rangeMediaHashes = new Set(
-              activeMediaItems
-                .filter(
-                  (item) =>
-                    item.start >= range.startXml && item.end <= range.endXml,
-                )
-                .map((item) => item.hash),
-            );
-            if (rangeMediaHashes.size === 0) return false;
-            if (expectedKbHashes !== undefined) {
-              return expectedKbHashes.some((hash) => rangeMediaHashes.has(hash));
+            ),
+          );
+          const collectKbMediaHashes = (
+            fills: readonly (typeof activeVolumeFills)[number][],
+          ): { volume: string[]; section: string[] } => {
+            const volumeByIdx = new Map<number, string>();
+            const sectionByIdx = new Map<number, string>();
+            for (const fill of fills) {
+              const bookmarkName =
+                fill.sealKind === "pending"
+                  ? `_Seal_P_${fill.id}`
+                  : `_Seal_F_${fill.id}`;
+              const range = activeRangeByName.get(bookmarkName);
+              if (!range) continue;
+              for (let idx = 0; idx < activeMediaItems.length; idx++) {
+                const item = activeMediaItems[idx];
+                if (item.start >= range.startXml && item.end <= range.endXml) {
+                  volumeByIdx.set(idx, item.hash);
+                  if (inNodeSection(item.start)) {
+                    sectionByIdx.set(idx, item.hash);
+                  }
+                }
+              }
             }
-            return true;
-          });
-          if (!mounted) {
-            issues.push({
+            return {
+              volume: [...volumeByIdx.values()],
+              section: [...sectionByIdx.values()],
+            };
+          };
+
+          if (!requireMedia) {
+            const isMatchingKbTextSource = (src: FactSource): boolean =>
+              (src.recordId === binding.ref ||
+                src.materialId === binding.ref) &&
+              src.media !== true;
+            const inSectionTextFill = matchingFills.some((fill) => {
+              const bookmarkName =
+                fill.sealKind === "pending"
+                  ? `_Seal_P_${fill.id}`
+                  : `_Seal_F_${fill.id}`;
+              const range = activeRangeByName.get(bookmarkName);
+              if (!range) return false;
+              return (fill.sources ?? []).some(
+                (src) =>
+                  isMatchingKbTextSource(src) &&
+                  sourceTextSatisfiedInRange(range, src, inNodeSection),
+              );
+            });
+            if (!inSectionTextFill) {
+              const elsewhere =
+                sectionSpan !== undefined &&
+                matchingFills.some((fill) => {
+                  const bookmarkName =
+                    fill.sealKind === "pending"
+                      ? `_Seal_P_${fill.id}`
+                      : `_Seal_F_${fill.id}`;
+                  const range = activeRangeByName.get(bookmarkName);
+                  if (!range) return false;
+                  return (fill.sources ?? []).some(
+                    (src) =>
+                      isMatchingKbTextSource(src) &&
+                      sourceTextSatisfiedInRange(range, src),
+                  );
+                });
+              pushVolumeIssue({
+                kind: "missing_evidence",
+                draft: volumeName,
+                nodeId: node.id,
+                title: node.title,
+                source: "kb",
+                ref: binding.ref,
+                reason: elsewhere
+                  ? `章节「${node.title}」绑定的知识库记录「${binding.label ?? binding.ref}」未引用到该章节范围内（仅出现在其他章节）`
+                  : `章节「${node.title}」绑定的知识库记录「${binding.label ?? binding.ref}」未引用到分册「${volumeName}」`,
+                suggestion: `请在章节「${node.title}」写入或挂载知识库记录 ${binding.ref}。`,
+              });
+            }
+            continue;
+          }
+
+          const { volume: volumeKbHashes, section: sectionKbHashes } =
+            collectKbMediaHashes(matchingFills);
+          if (expectedKbHashes !== undefined) {
+            const missingInSection = countMissingExpectedHashes(
+              expectedKbHashes,
+              sectionKbHashes,
+            );
+            if (missingInSection > 0) {
+              const missingInVolume = countMissingExpectedHashes(
+                expectedKbHashes,
+                volumeKbHashes,
+              );
+              const wrongSectionOnly =
+                sectionSpan !== undefined && missingInVolume === 0;
+              pushVolumeIssue({
+                kind: "missing_evidence",
+                draft: volumeName,
+                nodeId: node.id,
+                title: node.title,
+                source: "kb",
+                ref: binding.ref,
+                reason: wrongSectionOnly
+                  ? `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」图片未挂载到该章节范围内（已出现在其他章节）`
+                  : expectedKbHashes.length > 1
+                    ? `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」尚有 ${missingInSection}/${expectedKbHashes.length} 张原图未挂载到该章节`
+                    : `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」图片未挂载到分册「${volumeName}」`,
+                suggestion: `请在章节「${node.title}」挂载知识库记录 ${binding.ref} 的全部原图。`,
+              });
+            }
+          } else if (sectionKbHashes.length === 0) {
+            const wrongSectionOnly =
+              sectionSpan !== undefined && volumeKbHashes.length > 0;
+            pushVolumeIssue({
               kind: "missing_evidence",
               draft: volumeName,
               nodeId: node.id,
               title: node.title,
               source: "kb",
               ref: binding.ref,
-              reason: requireMedia
-                ? `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」图片未挂载到分册「${volumeName}」`
-                : `章节「${node.title}」绑定的知识库记录「${binding.label ?? binding.ref}」未引用到分册「${volumeName}」`,
-              suggestion: `请在该章节写入或挂载知识库记录 ${binding.ref}。`,
+              reason: wrongSectionOnly
+                ? `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」图片未挂载到该章节范围内（已出现在其他章节）`
+                : `章节「${node.title}」绑定的知识库证照「${binding.label ?? binding.ref}」图片未挂载到分册「${volumeName}」`,
+              suggestion: `请在章节「${node.title}」挂载知识库记录 ${binding.ref}。`,
             });
           }
           continue;
@@ -1996,7 +4574,7 @@ export async function checkOutlineConsistency(input: {
 
         const state = input.materialStates?.get(binding.ref);
         if (!state || !state.exists || !state.readable) {
-          issues.push({
+          pushVolumeIssue({
             kind: "missing_material_file",
             draft: volumeName,
             nodeId: node.id,
@@ -2011,7 +4589,7 @@ export async function checkOutlineConsistency(input: {
           continue;
         }
         if (state.missingPages && state.missingPages.length > 0) {
-          issues.push({
+          pushVolumeIssue({
             kind: "missing_material_file",
             draft: volumeName,
             nodeId: node.id,
@@ -2026,26 +4604,37 @@ export async function checkOutlineConsistency(input: {
 
         const expectedHashes = state.expectedImageHashes ?? [];
         if (expectedHashes.length > 0) {
-          const missingCount = expectedHashes.filter(
-            (hash) => !activeMedia.has(hash),
-          ).length;
+          const sectionMediaHashes = activeMediaItems
+            .filter((item) => inNodeSection(item.start))
+            .map((item) => item.hash);
+          const missingCount = countMissingExpectedHashes(
+            expectedHashes,
+            sectionMediaHashes,
+          );
           if (missingCount > 0) {
-            issues.push({
+            const volumeMissing = countMissingExpectedHashes(
+              expectedHashes,
+              activeMediaItems.map((item) => item.hash),
+            );
+            const wrongSectionOnly =
+              sectionSpan !== undefined && volumeMissing === 0;
+            pushVolumeIssue({
               kind: "missing_evidence",
               draft: volumeName,
               nodeId: node.id,
               title: node.title,
               source: "material",
               ref: binding.ref,
-              reason:
-                expectedHashes.length > 1
+              reason: wrongSectionOnly
+                ? `章节「${node.title}」绑定的上传材料「${binding.label ?? binding.ref}」图片未挂载到该章节范围内（已出现在其他章节）`
+                : expectedHashes.length > 1
                   ? `章节「${node.title}」绑定的上传材料「${binding.label ?? binding.ref}」尚有 ${missingCount}/${expectedHashes.length} 页未挂载到分册「${volumeName}」`
                   : `章节「${node.title}」绑定的上传材料「${binding.label ?? binding.ref}」尚未挂载到分册「${volumeName}」`,
-              suggestion: `请将该材料${binding.renderedPages?.length ? "全部渲染页" : "图片"}插入分册「${volumeName}」。`,
+              suggestion: `请将该材料${binding.renderedPages?.length ? "全部渲染页" : "图片"}插入章节「${node.title}」。`,
             });
           }
         } else if (state.kind === "pdf") {
-          issues.push({
+          pushVolumeIssue({
             kind: "missing_evidence",
             draft: volumeName,
             nodeId: node.id,
@@ -2057,25 +4646,56 @@ export async function checkOutlineConsistency(input: {
           });
         } else {
           const quotePrefix = `{{quote:${binding.ref}|`;
-          const quoted = activeVolumeFills.some((fill) =>
+          const matchingQuoteFills = activeVolumeFills.filter((fill) =>
             (fill.sources ?? []).some((src) =>
               src.reference.startsWith(quotePrefix),
             ),
           );
-          if (!quoted) {
-            issues.push({
+          const quotedInSection = matchingQuoteFills.some((fill) => {
+            const bookmarkName =
+              fill.sealKind === "pending"
+                ? `_Seal_P_${fill.id}`
+                : `_Seal_F_${fill.id}`;
+            const range = activeRangeByName.get(bookmarkName);
+            if (!range) return false;
+            return (fill.sources ?? []).some(
+              (src) =>
+                src.reference.startsWith(quotePrefix) &&
+                sourceTextSatisfiedInRange(range, src, inNodeSection),
+            );
+          });
+          if (!quotedInSection) {
+            const wrongSectionOnly =
+              sectionSpan !== undefined &&
+              matchingQuoteFills.some((fill) => {
+                const bookmarkName =
+                  fill.sealKind === "pending"
+                    ? `_Seal_P_${fill.id}`
+                    : `_Seal_F_${fill.id}`;
+                const range = activeRangeByName.get(bookmarkName);
+                if (!range) return false;
+                return (fill.sources ?? []).some(
+                  (src) =>
+                    src.reference.startsWith(quotePrefix) &&
+                    sourceTextSatisfiedInRange(range, src),
+                );
+              });
+            pushVolumeIssue({
               kind: "missing_evidence",
               draft: volumeName,
               nodeId: node.id,
               title: node.title,
               source: "material",
               ref: binding.ref,
-              reason: `章节「${node.title}」绑定的材料「${binding.label ?? binding.ref}」尚未通过原文引用写入分册「${volumeName}」`,
-              suggestion: `请使用 {{quote:${binding.ref}|<原文片段>}} 将该材料内容写入目标分册「${volumeName}」。`,
+              reason: wrongSectionOnly
+                ? `章节「${node.title}」绑定的材料「${binding.label ?? binding.ref}」原文引用未落在该章节范围内（仅出现在其他章节）`
+                : `章节「${node.title}」绑定的材料「${binding.label ?? binding.ref}」尚未通过原文引用写入分册「${volumeName}」`,
+              suggestion: `请使用 {{quote:${binding.ref}|<原文片段>}} 将该材料内容写入章节「${node.title}」。`,
             });
           }
         }
       }
+    }
     }
   }
 

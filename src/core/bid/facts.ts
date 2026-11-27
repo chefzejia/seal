@@ -25,6 +25,8 @@ export interface FactSource {
   media?: boolean;
   imageIndex?: number;
   cell?: { row: number; col: number; start: number; end: number };
+  /** Exact visible-character sub-span [start, end) relative to the containing _Seal_* bookmark. */
+  rangeSpan?: { start: number; end: number };
 }
 
 export interface FactResolution {
