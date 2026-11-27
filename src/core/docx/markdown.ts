@@ -90,7 +90,10 @@ export function markdownBlocks(markdown: string, options: { paragraphProperties?
       const heading = token as Tokens.Heading;
       const style = options.headingStyles?.get(heading.depth);
       if (!style) missing.add(heading.depth);
-      const properties = style ? `<w:pPr><w:pStyle w:val="${escapeXml(style)}"/></w:pPr>` : '';
+      const outlineLvl = Math.max(0, Math.min(8, heading.depth - 1));
+      const properties = style
+        ? `<w:pPr><w:pStyle w:val="${escapeXml(style)}"/></w:pPr>`
+        : `<w:pPr><w:keepNext/><w:outlineLvl w:val="${outlineLvl}"/></w:pPr>`;
       return paragraph(runs(heading.tokens, { bold: !style }), properties);
     }
     if (token.type === 'paragraph' || token.type === 'text') {
@@ -108,9 +111,25 @@ export function markdownBlocks(markdown: string, options: { paragraphProperties?
     if (token.type === 'table') {
       const table = token as Tokens.Table;
       const width = Math.max(1, Math.floor(options.widthTwips ?? layoutBox('<w:document><w:body/></w:document>', 0).width / 635));
-      const widths = table.header.map((_, index) => Math.floor(width * (index + 1) / table.header.length) - Math.floor(width * index / table.header.length));
-      const row = (cells: readonly Tokens.TableCell[]) => `<w:tr>${cells.map((cell, index) => `<w:tc><w:tcPr><w:tcW w:w="${widths[index]}" w:type="dxa"/></w:tcPr>${paragraph(runs(cell.tokens))}</w:tc>`).join('')}</w:tr>`;
-      return `<w:tbl><w:tblPr><w:tblW w:w="${width}" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>${widths.map(value => `<w:gridCol w:w="${value}"/>`).join('')}</w:tblGrid>${row(table.header)}${table.rows.map(row).join('')}</w:tbl>`;
+      const colCount = Math.max(1, table.header.length);
+      const widths = table.header.map((_, index) => Math.floor(width * (index + 1) / colCount) - Math.floor(width * index / colCount));
+      const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+        .map(edge => `<w:${edge} w:val="single" w:sz="4" w:space="0" w:color="auto"/>`)
+        .join('');
+      const margins = '<w:top w:w="0" w:type="dxa"/><w:left w:w="120" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="120" w:type="dxa"/>';
+      const row = (cells: readonly Tokens.TableCell[], isHeader: boolean) => {
+        const trPr = isHeader ? '<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>' : '<w:trPr><w:cantSplit/></w:trPr>';
+        return `<w:tr>${trPr}${cells.map((cell, index) => {
+          const colWidth = widths[index] ?? widths.at(-1) ?? width;
+          const align = table.align?.[index];
+          const pPr = align === 'left' || align === 'center' || align === 'right' ? `<w:pPr><w:jc w:val="${align}"/></w:pPr>` : '';
+          const tcPr = isHeader
+            ? `<w:tcPr><w:tcW w:w="${colWidth}" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/><w:vAlign w:val="center"/></w:tcPr>`
+            : `<w:tcPr><w:tcW w:w="${colWidth}" w:type="dxa"/><w:vAlign w:val="center"/></w:tcPr>`;
+          return `<w:tc>${tcPr}${paragraph(runs(cell.tokens, isHeader ? { bold: true } : {}), pPr)}</w:tc>`;
+        }).join('')}</w:tr>`;
+      };
+      return `<w:tbl><w:tblPr><w:tblW w:w="${width}" w:type="dxa"/><w:tblBorders>${borders}</w:tblBorders><w:tblLayout w:type="fixed"/><w:tblCellMar>${margins}</w:tblCellMar></w:tblPr><w:tblGrid>${widths.map(value => `<w:gridCol w:w="${value}"/>`).join('')}</w:tblGrid>${row(table.header, true)}${table.rows.map(item => row(item, false)).join('')}</w:tbl>`;
     }
     if (token.type === 'code') return paragraph(`<w:r><w:t xml:space="preserve">${escapeXml(token.text)}</w:t></w:r>`, normal);
     if (token.type === 'html' && /^<!--\s*pagebreak\s*-->$/i.test(token.raw.trim())) return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
